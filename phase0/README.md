@@ -6,6 +6,13 @@ Low Power Mode off. Plan: [`docs/plan.md`](../docs/plan.md).
 **Verdict: go.** The native window sits exactly where a wallpaper should, it stops all work when
 covered, and its memory use is a fraction of the web version's. Two things need tuning later (below).
 
+> **Correction (2026-11-05, later the same day):** the first run recorded the web version at 3.1% CPU
+> while covered. Three repeat runs, plus a per-process breakdown over two minutes, show **0.0%** once
+> loading and layout finish (about 15 s). The first run's window was visible for part of the
+> measurement. WKWebView marks a covered page `hidden`, stops animation frames and throttles timers,
+> and the web version already stops drawing when hidden. Covered, the web version's remaining cost is
+> memory (196–273 MB), not CPU.
+
 ## What was measured and how
 
 - **Web version (today):** the current server from
@@ -25,7 +32,7 @@ covered, and its memory use is a fraction of the web version's. Two things need 
 |---|---|---|
 | Animating, ~2,500 notes, visible | 7–9% CPU, 470–520 MB | 6.7% CPU, 280 MB |
 | Animating, 35,000 notes, visible | 12.8% CPU, 441 MB (draws at most 5,000) | 6.6% CPU, 312 MB (draws all 35,000) |
-| Behind your windows (desktop level) | 3.1% CPU, 292 MB | **0.0% CPU, 0 frames, 71 MB** |
+| Behind your windows (desktop level) | 0.0% CPU after ~15 s of loading, 196–273 MB | **0.0% CPU, 0 frames, 71 MB** |
 | Still frame | not available (idles at 10 fps by default) | 0.3% CPU, 67 MB |
 | Server process | +46 MB (Node) | none |
 
