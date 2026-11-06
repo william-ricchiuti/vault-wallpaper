@@ -83,7 +83,13 @@ cd spike && cargo run --release
 2. **CPU while animating is higher than the scene deserves** (6.7% for a trivial scene). Samples show
    it is almost all waiting in the kernel, which suggests frame-pacing overhead rather than real work.
    Try pacing with the display link (`CADisplayLink`) instead of timers in Phase 3.
-3. Not tested here: the file-access prompt for vaults in Documents or iCloud (your vault lives
+3. **Fixed: winit's occlusion events can disagree with the real window state.** In your first manual
+   run, winit's last event said "visible" while `NSWindow.occlusionState` (which wgpu checks before
+   every frame) said covered, for at least 28 seconds (170–198 s). The spike drew nothing and logged a
+   refused frame 30 times a second. The spike now reads `occlusionState` itself, pauses when wgpu refuses
+   a frame, and re-checks once a second while paused. The real app must do the same and never trust
+   the event alone.
+4. Not tested here: the file-access prompt for vaults in Documents or iCloud (your vault lives
    elsewhere), iCloud placeholder files, display hot-plug, and Sparkle. They move to the phases where
    they're needed.
 

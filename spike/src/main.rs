@@ -3,7 +3,9 @@
 //! One borderless window per display, placed at the desktop window level (behind the
 //! icons), on every Space, click-through. Draws a background gradient plus N glowing
 //! instanced dots orbiting, at a capped frame rate, and stops drawing entirely while
-//! the window is occluded.
+//! the window is occluded. Visibility is read from `NSWindow.occlusionState` (the same
+//! source wgpu checks before handing out a frame), and re-checked once a second while
+//! paused, because winit's occlusion events can disagree with it.
 //!
 //!   cargo run --release -- [--fps 30] [--nodes 2500] [--still] [--front] [--seconds N]
 //!
@@ -13,7 +15,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use objc2_app_kit::{NSView, NSWindowCollectionBehavior};
+use objc2::rc::Retained;
+use objc2_app_kit::{NSView, NSWindow, NSWindowCollectionBehavior, NSWindowOcclusionState};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -109,8 +112,15 @@ struct Surface {
     config: wgpu::SurfaceConfiguration,
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    ns_window: Option<Retained<NSWindow>>,
     occluded: bool,
     frames: u64,
+}
+
+impl Surface {
+    fn visible(&self) -> bool {
+        self.ns_window.as_ref().is_none_or(|w| w.occlusionState().contains(NSWindowOcclusionState::Visible))
+    }
 }
 
 struct Gpu {
@@ -130,17 +140,18 @@ struct App {
     start: Instant,
     next_frame: Instant,
     last_report: Instant,
+    last_poll: Instant,
 }
 
-fn place_on_desktop(window: &Window, front: bool) {
-    let Ok(handle) = window.window_handle() else { return };
-    let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+fn place_on_desktop(window: &Window, front: bool) -> Option<Retained<NSWindow>> {
+    let handle = window.window_handle().ok()?;
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else { return None };
     // SAFETY: winit hands us a valid NSView pointer for the lifetime of the window,
     // and we are on the main thread inside the event loop.
     let view: &NSView = unsafe { h.ns_view.cast().as_ref() };
-    let Some(ns_window) = view.window() else { return };
+    let ns_window = view.window()?;
     if front {
-        return;
+        return Some(ns_window);
     }
     let level = unsafe { CGWindowLevelForKey(KCG_DESKTOP_WINDOW_LEVEL_KEY) } as isize;
     ns_window.setLevel(level);
@@ -151,6 +162,7 @@ fn place_on_desktop(window: &Window, front: bool) {
     );
     ns_window.setIgnoresMouseEvents(true);
     ns_window.setHasShadow(false);
+    Some(ns_window)
 }
 
 impl App {
@@ -230,7 +242,7 @@ impl App {
             .with_has_shadow(false)
             .with_active(false);
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-        place_on_desktop(&window, self.opts.front);
+        let ns_window = place_on_desktop(&window, self.opts.front);
 
         if self.gpu.is_none() {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
@@ -277,7 +289,7 @@ impl App {
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() }],
         });
         window.request_redraw();
-        self.surfaces.push(Surface { window, surface, config, uniforms, bind_group, occluded: false, frames: 0 });
+        self.surfaces.push(Surface { window, surface, config, uniforms, bind_group, ns_window, occluded: false, frames: 0 });
     }
 
     fn draw(&mut self, id: WindowId) {
@@ -290,6 +302,13 @@ impl App {
         }
         let frame = match s.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                // wgpu read the real window state and found it covered: pause until the
+                // occlusion event or the once-a-second poll says it is visible again.
+                s.occluded = true;
+                eprintln!("[{t:.1}s] surface reports occluded; pausing");
+                return;
+            }
             other => {
                 eprintln!("surface: {other:?}");
                 s.surface.configure(&gpu.device, &s.config);
@@ -351,9 +370,13 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => self.draw(id),
             WindowEvent::Occluded(occ) => {
                 if let Some(s) = self.surfaces.iter_mut().find(|s| s.window.id() == id) {
-                    s.occluded = occ;
-                    eprintln!("[{:.1}s] occluded={occ}", self.start.elapsed().as_secs_f32());
-                    if !occ {
+                    let visible = s.visible();
+                    s.occluded = !visible;
+                    eprintln!(
+                        "[{:.1}s] occlusion event: winit occluded={occ}, window visible={visible}",
+                        self.start.elapsed().as_secs_f32()
+                    );
+                    if visible {
                         s.window.request_redraw();
                     }
                 }
@@ -388,11 +411,22 @@ impl ApplicationHandler for App {
             }
             self.last_report = now;
         }
+        if now.duration_since(self.last_poll) >= Duration::from_secs(1) {
+            self.last_poll = now;
+            for (i, s) in self.surfaces.iter_mut().enumerate() {
+                if s.occluded && s.visible() {
+                    s.occluded = false;
+                    eprintln!("[{:.1}s] win{i} visible again (found by poll, no event)", self.start.elapsed().as_secs_f32());
+                    s.window.request_redraw();
+                }
+            }
+        }
         let any_visible = self.surfaces.iter().any(|s| !s.occluded);
         if self.opts.still || !any_visible {
             // Nothing to animate: sleep until an event (occlusion change, resize) or the
             // next stats report / time limit.
-            event_loop.set_control_flow(ControlFlow::WaitUntil(self.last_report + Duration::from_secs(5)));
+            let poll = if self.opts.still { self.last_report + Duration::from_secs(5) } else { self.last_poll + Duration::from_secs(1) };
+            event_loop.set_control_flow(ControlFlow::WaitUntil(poll.min(self.last_report + Duration::from_secs(5))));
             return;
         }
         if now >= self.next_frame {
@@ -418,6 +452,6 @@ fn main() {
         .build()
         .expect("event loop");
     let now = Instant::now();
-    let mut app = App { opts, gpu: None, surfaces: Vec::new(), start: now, next_frame: now, last_report: now };
+    let mut app = App { opts, gpu: None, surfaces: Vec::new(), start: now, next_frame: now, last_report: now, last_poll: now };
     event_loop.run_app(&mut app).expect("run");
 }
