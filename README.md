@@ -28,3 +28,13 @@ cargo run --release -p vault-wallpaper -- --vault ~/path/to/your/vault
 
 It puts your vault's graph behind the desktop icons. Add `--front` to show it in a normal
 window instead. Quit with Ctrl-C.
+
+## Build the app
+
+```bash
+packaging/build-app.sh   # dist/Vault Wallpaper.app (universal, macOS 13+)
+packaging/make-dmg.sh    # dist/Vault-Wallpaper-<version>.dmg
+```
+
+Signing (`sign.sh`) and notarization (`notarize.sh`) need a Developer ID; see
+[`packaging/README.md`](packaging/README.md) for the order and the one-time setup.

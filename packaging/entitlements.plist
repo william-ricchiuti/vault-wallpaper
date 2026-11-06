@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for Vault Wallpaper. Intentionally empty: the app is not
+  sandboxed (it reads a user-chosen vault folder anywhere on disk), loads no unsigned code,
+  and needs no JIT. Add a key here only when a feature needs it, with a comment saying why.
+-->
+<plist version="1.0">
+<dict>
+</dict>
+</plist>
