@@ -1,0 +1,14 @@
+[package]
+name = "vault-wallpaper"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+objc2 = "0.6.5"
+objc2-app-kit = "0.3.2"
+objc2-foundation = "0.3.2"
+raw-window-handle = "0.6.2"
+vw-core = { version = "0.1.0", path = "../core" }
+vw-render = { version = "0.1.0", path = "../render" }
+wgpu = "30.0.1"
+winit = "0.30.13"

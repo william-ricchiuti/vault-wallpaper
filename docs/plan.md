@@ -2,7 +2,7 @@
 
 Status: Phase 0 done (go), see [`phase0/README.md`](../phase0/README.md). Phase 1 (reader) and
 Phase 2 (layout) done, see [Phase 1 results](#phase-1-results) and [Phase 2 results](#phase-2-results).
-Phases 3+ not started.
+Phase 3 (renderer foundation) done, see [Phase 3 results](#phase-3-results). Phases 4+ in progress.
 
 File names such as `parser.js`, `layout-core.js`, `settings.html`, `scripts/smoke.js` and `docs/presets/`
 refer to the web version, which lives on in
@@ -204,6 +204,22 @@ Done 2026-11-06 in `crates/core` (`vw_core::layout`).
   "Export PNG".
 - **Done when:** the "Plain" preset runs on your vault as your wallpaper for a full day with no
   crashes, and idle numbers beat the Phase 0 baseline clearly.
+
+#### Phase 3 results
+Done 2026-11-06: `crates/render` (`vw-render`) and the app, `crates/app` (`vault-wallpaper`).
+- The renderer draws the background, links as anti-aliased quads and notes as anti-aliased
+  discs, all instanced. Framing is a port of the web version's (centre, fill, left, right,
+  none, zoom, offsets, safe area, small-vault scale cap). It also renders off-screen to PNG,
+  for export and image tests.
+- The app: a wallpaper window per display; the vault scan, watcher and layout engine on
+  background threads. It **draws only when something changed** and sleeps otherwise; a
+  hidden screen with pending changes re-checks visibility once a second.
+- Real vault (2,604 notes), visible window: first run settles in 1.7 s; a relaunch from the
+  layout cache is settled and drawn 0.3 s after launch. Memory 58–85 MB in one process,
+  versus 300–520 MB plus a 46 MB Node server for the web version. About 0.2% CPU once
+  settled.
+- Not yet: display hot-plug, the soak test result (below), config (parallel session),
+  colours and options beyond the plain look (Phase 4).
 
 ### Phase 4: Default look at full quality (L)
 **You get:** everything the default renderer does today, looking better. This unlocks all 18

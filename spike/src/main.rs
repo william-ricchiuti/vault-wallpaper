@@ -397,11 +397,11 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
-        if let Some(limit) = self.opts.seconds {
-            if self.start.elapsed().as_secs_f64() >= limit {
-                event_loop.exit();
-                return;
-            }
+        if let Some(limit) = self.opts.seconds
+            && self.start.elapsed().as_secs_f64() >= limit
+        {
+            event_loop.exit();
+            return;
         }
         if now.duration_since(self.last_report) >= Duration::from_secs(5) {
             let secs = now.duration_since(self.last_report).as_secs_f64();
