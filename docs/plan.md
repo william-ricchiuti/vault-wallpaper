@@ -14,6 +14,34 @@ draws with the graphics chip, remembers the graph's shape between launches, and 
 when nothing on screen can see it. Settings live behind a menu-bar icon. It updates itself.
 Windows and Linux follow later from the same code.
 
+## Lightness first (decided 2026-11-05)
+
+The app should be as light on the computer as possible while still looking great. This rule outranks
+feature parity with the web version: a look that can't meet the budget gets redesigned or dropped.
+Themes may be designed from scratch for this, not ported.
+
+**Rules every theme and feature follows:**
+1. **Still is the default state.** A visible wallpaper with nothing new to show draws no frames.
+   Motion is the exception, and it should be slow and designed to look good at low frame rates
+   (drifts, crossfades, breathing), not smooth 60 fps movement.
+2. **Draw the expensive part once.** The graph, glow and textures are drawn into cached images when
+   something changes (vault edit, config change, screen change). An animated frame only recombines
+   those cached images, ideally one cheap full-screen pass with a few texture reads per pixel, such
+   as fading glow intensity or slowly rotating a cached star field.
+3. **Soft things at low resolution.** Glow, fog, nebula and aurora are drawn at a quarter or a
+   sixteenth of screen resolution and scaled up, since they're blurry anyway. Only crisp elements
+   (node cores, lines, text) use full resolution.
+4. **Motion comes from events, not a clock.** A vault edit can trigger a short burst (a pulse, a
+   bloom, an ink bleed) that ends and returns to still. Clock-based change (time-of-day tint, a slow
+   drift) updates rarely: about once a minute, or a few frames per second at most.
+5. **No per-frame CPU work.** Per-frame changes are a few numbers sent to the GPU. Layout, parsing and
+   geometry happen only when the vault changes.
+6. **Power aware.** On battery or in Low Power Mode, themes fall back to a still frame, or to their
+   lowest motion setting if the user opts in.
+7. **Measured, not assumed.** Every theme has a budget, checked automatically with off-screen renders:
+   idle cost 0, an animated frame under ~1 ms of GPU time at full Retina resolution, and the whole app
+   under ~100 MB.
+
 ## What stays, what goes, what changes
 
 | Today | v2 |
@@ -166,14 +194,34 @@ settings.
 - **Done when:** a fresh Mac user can go from download to working wallpaper without reading the README.
 
 ### Phase 6: Launch themes (M–L)
-**You get:** the stand-out looks rebuilt for the GPU. Suggested launch set, open to change:
-- **Aurora, Synapse, Celestial**: the most "wallpaper" themes, and they gain the most from real bloom
-  and HDR.
-- **Phosphor and Pocket Pixel**: mostly full-screen filters (scanlines, dithering, quantising), which
-  are much easier as shaders than in Canvas2D. Cheap wins.
+**You get:** about five themes designed from scratch around the lightness rules, rather than
+straight ports of the web themes. Web themes are a source of ideas, not a spec.
+- Shortlist the concepts in [Theme concepts](#theme-concepts-lightness-first), prototype the
+  favourites in the spike, measure each against the budget, and keep the ones that look great *and*
+  cost almost nothing.
 - Each theme is a "look": a set of shaders plus parameters on top of the shared graph data, so adding
   one later doesn't touch the core.
-- **Done when:** each launch theme passes a side-by-side review and has a golden-image test.
+- **Done when:** each launch theme meets its budget in the automated check, has a golden-image test,
+  and you'd keep it on your own desktop.
+
+### Theme concepts (lightness first)
+
+Starting ideas, each designed to cost nothing when idle and very little when moving:
+
+| Concept | Idea | What moves, and what it costs |
+|---|---|---|
+| **Long Exposure** | The graph as a long-exposure photo: links are light trails, hubs glow | Nothing, by default. An edit adds one new trail that fades in |
+| **Night Sky** | Notes as stars with diffraction spikes; tags as constellations | The cached sky rotates very slowly (a few fps); the rotation is one texture read per pixel |
+| **Breathing Glow** | The classic glowing graph, done right | Glow intensity fades up and down on the cached bloom image, which is nearly free |
+| **Pulse** | A still graph; your recent edits send light along their links | Only the small pulse sprites; cost follows your activity and is zero when you're not editing |
+| **Aurora Lite** | Slow curtains of colour over tag clusters | Curtains drawn at 1/16 resolution at a few fps, then scaled up |
+| **Ink & Paper** | A printed, light-background graph (riso / ink feel) | Nothing; an edit triggers a two-second ink bleed |
+| **Atlas** | Tags as territories with borders, hubs as capitals (a map) | Nothing; redrawn only when the vault changes |
+| **Stained Glass** | Notes as glass panes lit from behind | Optional slow light sweep across the cached image |
+
+Default renderer: Phase 4 rebuilds it under the same rules. Options that can't meet the budget
+(constant particle streams, full-rate depth of field) are reworked or dropped, and presets map onto
+what remains.
 
 ### Phase 7: Packaging and release (S–M)
 **You get:** a download that opens with no warnings and keeps itself up to date.
@@ -216,7 +264,8 @@ settings.
 |---|---|
 | Covered by windows or fullscreen app | 0 frames drawn, ~0% CPU |
 | Visible, nothing animating | Still frame, ~0% CPU |
-| Animating at 30 fps (Ambient on a 5k-note vault, Apple Silicon) | Low single-digit CPU %, "Low" Energy Impact |
+| Animating (any theme, 5k-note vault, Apple Silicon) | Under 1 ms GPU per frame at full Retina resolution, ~1% CPU, "Low" Energy Impact |
+| Vault edit burst (pulse, bloom, bleed) | Back to a still frame within a few seconds |
 | Memory (5k notes) | Under ~100 MB for the whole app |
 | Launch to settled picture (cached layout) | Under 1 second |
 | 35k notes / 120k links, Neon preset | Steady 30 fps |
@@ -252,16 +301,16 @@ These are goals, not measurements. Phase 0 supplies the real "before" numbers.
 - **Scope creep.** 34 looks is a lot. The phase gates are there so v2.0 can ship with the default
   renderer plus about 5 themes.
 
-## Decisions I need from you
+## Decisions
 
 1. **Repo.** ✅ Decided 2026-11-05: separate repos. This repo (`vault-wallpaper`) is the native app;
    `obsidian-live-wallpaper` stays the web version and keeps getting targeted improvements.
-2. **Settings UI.** Reuse `settings.html` in an on-demand web view (recommended), a fully native Rust UI
-   (`egui`, quicker to wire up but looks more like a developer tool), or SwiftUI (best Mac feel,
-   Mac-only, two languages).
-3. **Launch themes.** Aurora, Synapse, Celestial, Phosphor, Pocket Pixel as proposed, or your own picks.
-4. **Minimum macOS.** 13 Ventura (recommended: modern login-item API, covers almost every Mac in use)
-   or older.
+2. **Settings UI.** ✅ Decided 2026-11-05: reuse `settings.html` in an on-demand web view (option A), its
+   `/api/*` calls answered inside the app. Can be swapped for SwiftUI later.
+3. **Launch themes.** ✅ Direction decided 2026-11-05: themes designed from scratch for lightness (see
+   [Theme concepts](#theme-concepts-lightness-first)). The exact five are picked after prototyping.
+4. **Minimum macOS.** ✅ Decided 2026-11-05: macOS 13 Ventura and up, universal binary (Apple Silicon +
+   Intel). README says "tested on macOS 26–27".
 5. **Name and bundle id.** For example "Obsidian Live Wallpaper" / `com.williamricchiuti.olw`. Using
    "Obsidian" in an app name may need a check against Obsidian's brand guidelines before release.
 6. **Distribution.** DMG + Homebrew first (recommended), Mac App Store later. The App Store requires
