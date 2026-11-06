@@ -36,8 +36,12 @@ for t in "${TARGETS[@]}"; do
   fi
 done
 
-# Build each architecture. The deployment target sets the binary's minimum macOS.
-export MACOSX_DEPLOYMENT_TARGET="$MIN_MACOS"
+# Build each architecture.
+# The 13.0 minimum is enforced by LSMinimumSystemVersion in Info.plist. Don't export
+# MACOSX_DEPLOYMENT_TARGET here: with rustc 1.93 + the Xcode 27 linker, setting it together with
+# `--target` produces proc-macro dylibs rustc can't load ("E0463 can't find crate for
+# `thiserror_impl`"). The binaries keep rustc's default minimums (11.0 arm64, 10.12 x86_64).
+unset MACOSX_DEPLOYMENT_TARGET
 SLICES=()
 for t in "${TARGETS[@]}"; do
   echo "==> cargo build --release -p $BIN_NAME --target $t"

@@ -29,8 +29,12 @@ bundle with its `Info.plist`:
 - `CFBundleIdentifier` `com.williamricchiuti.vaultwallpaper`
 - `CFBundleName` / `CFBundleDisplayName` "Vault Wallpaper"
 - `CFBundleShortVersionString` / `CFBundleVersion` from `crates/app/Cargo.toml`
-- `LSUIElement` true (no Dock icon), `LSMinimumSystemVersion` 13.0 (the binary is also
-  built with `MACOSX_DEPLOYMENT_TARGET=13.0`), `NSHighResolutionCapable` true
+- `LSUIElement` true (no Dock icon), `LSMinimumSystemVersion` 13.0, `NSHighResolutionCapable` true
+
+The 13.0 floor comes from the plist alone. The script deliberately unsets
+`MACOSX_DEPLOYMENT_TARGET`: with rustc 1.93 and the Xcode 27 linker, setting it together with
+`--target` breaks proc-macro crates (`E0463 can't find crate for thiserror_impl`). Cargo does not
+rebuild when that variable changes, so if you hit E0463 after setting it, run `cargo clean`.
 
 It honours `CARGO_TARGET_DIR`. The icon is a placeholder drawn by `icon/make-icon-png.py`
 (standard-library Python) and committed as `icon/icon-1024.png`; the script turns it into
