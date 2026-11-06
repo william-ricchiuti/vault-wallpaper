@@ -42,6 +42,8 @@ pub struct SceneStyle {
     pub label_style: TextStyle,
     /// Tone effects down on big vaults (`autoScaleLargeVaults`), as the web version does.
     pub auto_scale: bool,
+    /// Badge plate opacity (`labelStyle.backgroundAlpha`, default 0.72).
+    pub label_plate_alpha: f32,
 }
 
 /// The web version's per-size tuning (`sceneTuning`): bigger vaults get subtler,
@@ -147,6 +149,7 @@ pub fn style_from_config(cfg: &Config, light: bool) -> SceneStyle {
             _ => TextStyle::Badge,
         },
         auto_scale: cfg.auto_scale_large_vaults,
+        label_plate_alpha: cfg.label_style.background_alpha.unwrap_or(0.72) as f32,
     }
 }
 
@@ -252,8 +255,12 @@ pub fn build_scene(
     }
 
     if style.labels && look.label_count > 0 {
-        // The web version's drawLabels: candidates in order, skipping any off-screen or
-        // overlapping an earlier label, until `label_count` are placed.
+        // The web version's drawLabels: candidates in order, skipping any off-screen
+        // or overlapping an earlier label, until `label_count` are placed. Text sits
+        // 16 pt below the note's centre line plus its radius.
+        let bg = style.background;
+        let light_bg = 0.2126 * bg[0] + 0.7152 * bg[1] + 0.0722 * bg[2] > 0.4;
+        let text_color = if light_bg { [30.0 / 255.0, 30.0 / 255.0, 35.0 / 255.0, 0.85] } else { [245.0 / 255.0, 247.0 / 255.0, 1.0, 0.88] };
         let mut placed: Vec<[f32; 4]> = Vec::new();
         for pick in &look.labels {
             if placed.len() >= look.label_count as usize {
@@ -263,28 +270,36 @@ pub fn build_scene(
             if i >= n {
                 continue;
             }
+            let dof_alpha = if tune.depth_of_field { 1.0 - dist(screen[i]) * 0.4 } else { 1.0 };
+            if dof_alpha <= 0.12 {
+                continue;
+            }
             let r = look.node_radius.get(i).copied().unwrap_or(2.0);
-            let font = 11.0 + pick.importance * 3.0;
-            let w = (pick.text.chars().count() as f32 * font * 0.56).min(220.0) + 16.0;
-            let (x, y) = (screen[i][0], screen[i][1] + r + 4.0);
-            let rect = [x - w / 2.0, y - 4.0, x + w / 2.0, y + font * 1.3 + 4.0];
-            let off = rect[0] < 0.0 || rect[1] < 0.0 || rect[2] > size[0] || rect[3] > size[1];
-            let overlaps = placed.iter().any(|p| rect[0] < p[2] && p[0] < rect[2] && rect[1] < p[3] && p[1] < rect[3]);
+            let font = (11.0 + pick.importance * 5.0).max(10.0);
+            // Width estimate for overlap tests; the text renderer measures exactly.
+            let w = pick.text.chars().count() as f32 * font * 0.55;
+            let (x, y) = (screen[i][0], screen[i][1] + r + 16.0);
+            let rect = [x - w / 2.0 - 8.0, y - font / 2.0 - 5.0, x + w / 2.0 + 8.0, y + font / 2.0 + 5.0];
+            let off = rect[0] < 10.0 || rect[1] < 10.0 || rect[2] > size[0] - 10.0 || rect[3] > size[1] - 10.0;
+            let overlaps = placed.iter().any(|p| !(rect[2] < p[0] || p[2] < rect[0] || rect[3] < p[1] || p[3] < rect[1]));
             if off || overlaps {
                 continue;
             }
             placed.push(rect);
             let [cr, cg, cb, _] = look.node_color.get(i).copied().unwrap_or([1.0; 4]);
+            // Badge plate: the background tinted 12% toward the note's colour.
+            let plate = [bg[0] + (cr - bg[0]) * 0.12, bg[1] + (cg - bg[1]) * 0.12, bg[2] + (cb - bg[2]) * 0.12, style.label_plate_alpha * dof_alpha];
+            let accent = if style.label_style == TextStyle::Glow { [cr, cg, cb, 0.9 * dof_alpha] } else { plate };
             data.text.push(TextItem {
                 text: pick.text.clone(),
-                pos: [x, y],
+                pos: [x, y - font * 0.625],
                 anchor: Anchor::TopCenter,
                 size: font,
-                color: [0.94, 0.94, 0.97, 0.92],
+                color: [text_color[0], text_color[1], text_color[2], text_color[3] * dof_alpha],
                 family: style.label_font,
                 style: style.label_style,
-                accent: [cr, cg, cb, 0.35],
-                max_width: Some(220.0),
+                accent,
+                max_width: None,
             });
         }
     }

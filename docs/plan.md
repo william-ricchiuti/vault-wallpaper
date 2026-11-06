@@ -237,6 +237,23 @@ settings.
 - **Done when:** all 18 presets render, each passes a side-by-side review with today's screenshots in
   `docs/presets/`, and Neon/Ambient stay smooth on a 35k-note vault.
 
+#### Phase 4 results
+Done 2026-11-06 (`crates/render`: `look.rs`, `scene.rs`, `text.rs`, `post.wgsl`).
+- Layered renderer: the scene (gradient, halos, links, notes, labels) and a quarter-resolution
+  blurred glow layer are drawn only when something changes. Full Retina scene in ~19 ms.
+- All 18 default-renderer presets of the real vault, rendered natively and by the web version
+  (each with its own server config), match closely: backgrounds, palettes, colour modes, glow,
+  light themes, label badges. Contact sheets (web left, native right): `docs/phase4/presets-*.png`.
+- **Breathing without frames.** Redrawing frames for glow breathing cost +216 MB driver
+  memory and ~2.5% app CPU at any frame rate. The glow now lives in a quarter-resolution
+  Core Animation layer whose opacity the window server animates: app memory stays ~96 MB and
+  the app draws nothing while it breathes. The window server does some work (noisy to measure);
+  stepping the opacity from the app at 8 fps measured worse. New installs start with motion
+  off; breathing is opt-in.
+- Not ported: note flares (edit highlights) and particles; they come back as event-driven
+  effects in the Phase 6 Pulse theme. The web default on a dense vault is a purple haze of
+  overlapping halos in both versions: faithful, and a reason for the new themes.
+
 ### Phase 5: App shell (M)
 **You get:** it behaves like a finished Mac app.
 - Menu-bar icon and menu, settings window, first-run flow (pick vault with a folder picker, import an
