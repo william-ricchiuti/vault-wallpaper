@@ -336,18 +336,24 @@ These are goals, not measurements. Phase 0 supplies the real "before" numbers.
 
 ## Decisions
 
+From 2026-11-06 William asked for the remaining phases to run without stopping for approval;
+remaining open choices take the recommended default below. Anything that publishes or uses his
+credentials (notarization, making the repo public, releases) still waits for him.
+
 1. **Repo.** ✅ Decided 2026-11-05: separate repos. This repo (`vault-wallpaper`) is the native app;
    `obsidian-live-wallpaper` stays the web version and keeps getting targeted improvements.
 2. **Settings UI.** ✅ Decided 2026-11-05: reuse `settings.html` in an on-demand web view (option A), its
    `/api/*` calls answered inside the app. Can be swapped for SwiftUI later.
 3. **Launch themes.** ✅ Direction decided 2026-11-05: themes designed from scratch for lightness (see
-   [Theme concepts](#theme-concepts-lightness-first)). The exact five are picked after prototyping.
+   [Theme concepts](#theme-concepts-lightness-first)). Default set taken 2026-11-06 for prototyping:
+   Breathing Glow (the rebuilt default), Night Sky, Pulse, Aurora Lite and Ink & Paper (the light one),
+   for variety across glow, calm, activity, colour and light. Any that miss the budget are swapped.
 4. **Minimum macOS.** ✅ Decided 2026-11-05: macOS 13 Ventura and up, universal binary (Apple Silicon +
    Intel). README says "tested on macOS 26–27".
-5. **Name and bundle id.** For example "Obsidian Live Wallpaper" / `com.williamricchiuti.olw`. Using
-   "Obsidian" in an app name may need a check against Obsidian's brand guidelines before release.
-6. **Distribution.** DMG + Homebrew first (recommended), Mac App Store later. The App Store requires
-   sandboxing, which changes how vault access works.
+5. **Name and bundle id.** ✅ Default taken 2026-11-06: "Vault Wallpaper", bundle id
+   `com.williamricchiuti.vaultwallpaper`. No "Obsidian" in the app name.
+6. **Distribution.** ✅ Default taken 2026-11-06: signed and notarized DMG on GitHub Releases plus a
+   Homebrew cask in William's own tap. Mac App Store later, if ever.
 7. **The npm package.** ✅ Decided 2026-11-05: it stays with the web version, which is still maintained.
 
 ## Rough total
