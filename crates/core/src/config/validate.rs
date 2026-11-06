@@ -19,8 +19,9 @@ const OVERLAYS: &[&str] = &["none", "clock", "stats", "note"];
 const LABEL_SOURCES: &[&str] = &["hubs", "recent"];
 const RENDERERS: &[&str] = &["auto", "canvas", "webgl"];
 
-/// Theme ids the web version accepts (its `themes/*.js` plus `default`). Kept so old
-/// configs and presets import; the renderer decides what each one looks like natively.
+/// Theme ids accepted: the web version's (its `themes/*.js` plus `default`), kept so old
+/// configs and presets import, followed by the native app's own themes (designed for
+/// lightness; the web version rejects these ids, an intentional difference).
 pub const THEMES: &[&str] = &[
     "default",
     "aurora",
@@ -39,6 +40,11 @@ pub const THEMES: &[&str] = &[
     "synapse",
     "territories",
     "wash",
+    // Native themes.
+    "night-sky",
+    "pulse",
+    "aurora-lite",
+    "ink-paper",
 ];
 
 #[derive(Clone, Copy)]

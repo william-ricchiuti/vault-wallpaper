@@ -28,8 +28,8 @@ use menu::{Action, AppMenu};
 use overlay::GlowOverlay;
 use tray_icon::menu::MenuEvent;
 use vw_render::{
-    Framing, FramingOptions, Gpu, Look, LookContext, SceneStyle, WallpaperRenderer, build_scene, derive_look, preferred_format,
-    render_rgba, style_from_config, write_png,
+    Ambient, Framing, FramingOptions, Gpu, Look, LookContext, SceneStyle, Theme, WallpaperRenderer, derive_look, preferred_format,
+    render_rgba, write_png,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -132,6 +132,7 @@ struct App {
     args: Args,
     proxy: EventLoopProxy<AppEvent>,
     cfg: Config,
+    theme: Theme,
     style: SceneStyle,
     framing: FramingOptions,
     gpu: Option<Gpu>,
@@ -266,7 +267,8 @@ impl App {
     }
 
     fn apply_style(&mut self) {
-        self.style = style_from_config(&self.cfg, false);
+        self.theme = Theme::from_config(&self.cfg);
+        self.style = self.theme.style(&self.cfg, false);
         self.framing = FramingOptions::from_config(&self.cfg);
         self.update_breathing();
     }
@@ -274,10 +276,13 @@ impl App {
     /// Breathing as Core Animation should run it now: off when paused, in Low Power
     /// Mode, or when the style doesn't breathe.
     fn breathing(&self) -> Option<(f32, f32, f32)> {
-        if self.paused || self.low_power || !self.style.animates() {
+        if self.paused || self.low_power {
             return None;
         }
-        self.style.breathing.map(|(depth, period)| (depth, period, self.style.motion_fps))
+        match self.theme.ambient(&self.style) {
+            Ambient::Breathe { depth, period, fps } => Some((depth, period, fps)),
+            Ambient::None => None,
+        }
     }
 
     fn update_breathing(&mut self) {
@@ -386,7 +391,7 @@ impl App {
             let data = match &self.shown {
                 Some(sh) => {
                     let framing = Framing::fit(&sh.positions, points[0], points[1], &self.framing);
-                    build_scene(&sh.layout, &sh.look, &sh.positions, &framing, &self.style, points)
+                    self.theme.build(&sh.layout, &sh.look, &sh.positions, &framing, &self.style, points)
                 }
                 None => Default::default(),
             };
@@ -469,7 +474,7 @@ impl App {
         let size = [screen.config.width, screen.config.height];
         let points = [size[0] as f32 / scale, size[1] as f32 / scale];
         let framing = Framing::fit(&sh.positions, points[0], points[1], &self.framing);
-        let data = build_scene(&sh.layout, &sh.look, &sh.positions, &framing, &self.style, points);
+        let data = self.theme.build(&sh.layout, &sh.look, &sh.positions, &framing, &self.style, points);
         let rgba = render_rgba(gpu, size, scale, &self.style, &data, 1.0);
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
         let dir = home.join("Pictures/Vault Wallpaper");
@@ -590,7 +595,8 @@ fn main() {
         .expect("event loop");
     let mut app = App {
         proxy: event_loop.create_proxy(),
-        style: style_from_config(&cfg, false),
+        theme: Theme::from_config(&cfg),
+        style: Theme::from_config(&cfg).style(&cfg, false),
         framing: FramingOptions::from_config(&cfg),
         cfg,
         args,

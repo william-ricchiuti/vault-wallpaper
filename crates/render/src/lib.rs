@@ -16,6 +16,7 @@ mod framing;
 mod look;
 mod scene;
 mod text;
+pub mod theme;
 
 use std::path::Path;
 
@@ -23,7 +24,8 @@ use bytemuck::{Pod, Zeroable};
 
 pub use framing::{Framing, FramingMode, FramingOptions, SafeArea};
 pub use look::{LabelPick, Look, LookContext, derive_look};
-pub use scene::{EdgeStyle, SceneData, SceneStyle, build_scene, parse_hex, style_from_config, tag_color};
+pub use scene::{BgMode, EdgeStyle, SceneData, SceneStyle, build_scene, parse_hex, style_from_config, tag_color};
+pub use theme::{Ambient, Theme};
 pub use text::{Anchor, FontFamily, TextItem, TextRenderer, TextStyle};
 
 /// Format of the cached scene texture.
@@ -57,7 +59,7 @@ pub struct NodeInstance {
 struct Uniforms {
     size: [f32; 2],
     scale: f32,
-    _pad: f32,
+    bg_mode: f32,
     background: [f32; 4],
     background_glow: [f32; 4],
 }
@@ -173,6 +175,7 @@ struct Pipelines {
     halos: wgpu::RenderPipeline,
     edges: wgpu::RenderPipeline,
     nodes: wgpu::RenderPipeline,
+    stars: wgpu::RenderPipeline,
     glow: wgpu::RenderPipeline,
     blur: wgpu::RenderPipeline,
     composite: wgpu::RenderPipeline,
@@ -245,6 +248,7 @@ impl Pipelines {
             halos: make(&scene_mod, &scene_layout, "node_vs", "halo_fs", std::slice::from_ref(&node), SCENE_FORMAT, alpha),
             edges: make(&scene_mod, &scene_layout, "edge_vs", "edge_fs", &[Some(edge_layout)], SCENE_FORMAT, alpha),
             nodes: make(&scene_mod, &scene_layout, "node_vs", "node_fs", std::slice::from_ref(&node), SCENE_FORMAT, alpha),
+            stars: make(&scene_mod, &scene_layout, "node_vs", "star_fs", std::slice::from_ref(&node), SCENE_FORMAT, alpha),
             glow: make(&scene_mod, &scene_layout, "node_vs", "glow_fs", std::slice::from_ref(&node), GLOW_FORMAT, additive),
             blur: make(&post_mod, &blur_layout, "full_vs", "blur_fs", &[], GLOW_FORMAT, None),
             composite: make(&post_mod, &composite_layout, "full_vs", "composite_fs", &[], out_format, None),
@@ -300,6 +304,7 @@ pub struct WallpaperRenderer {
     halo_buf: Option<wgpu::Buffer>,
     edge_buf: Option<wgpu::Buffer>,
     node_buf: Option<wgpu::Buffer>,
+    star_buf: Option<wgpu::Buffer>,
     glow_buf: Option<wgpu::Buffer>,
     has_glow: bool,
 }
@@ -341,6 +346,7 @@ impl WallpaperRenderer {
             halo_buf: None,
             edge_buf: None,
             node_buf: None,
+            star_buf: None,
             glow_buf: None,
             has_glow: false,
         }
@@ -404,6 +410,7 @@ impl WallpaperRenderer {
         let halos = instance_buffer(gpu, &mut self.halo_buf, &data.halos, "halos");
         let edges = instance_buffer(gpu, &mut self.edge_buf, &data.edges, "edges");
         let nodes = instance_buffer(gpu, &mut self.node_buf, &data.nodes, "nodes");
+        let stars = instance_buffer(gpu, &mut self.star_buf, &data.stars, "stars");
         let glows = instance_buffer(gpu, &mut self.glow_buf, &data.glow, "glow");
         self.has_glow = glows > 0 && style.glow > 0.0;
         self.text.prepare(gpu, &data.text, size, scale);
@@ -412,7 +419,7 @@ impl WallpaperRenderer {
         let mut u = Uniforms {
             size: points,
             scale,
-            _pad: 0.0,
+            bg_mode: style.bg_mode as u32 as f32,
             background: [style.background[0], style.background[1], style.background[2], 1.0],
             background_glow: style.background_glow,
         };
@@ -432,6 +439,7 @@ impl WallpaperRenderer {
             draw_instances(&mut pass, &p.halos, &self.halo_buf, halos);
             draw_instances(&mut pass, &p.edges, &self.edge_buf, edges);
             draw_instances(&mut pass, &p.nodes, &self.node_buf, nodes);
+            draw_instances(&mut pass, &p.stars, &self.star_buf, stars);
             self.text.render(&mut pass);
         }
         if self.has_glow {
