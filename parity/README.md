@@ -21,3 +21,11 @@ nodes, 9,043 links, 2,597 excerpts) and a 35,000-note synthetic vault (104,141 l
 Known difference, on purpose: notes named `toString`, or links like `[[constructor]]`,
 crash `parser.js` (it uses plain objects as lookup tables) but work in Rust. The fixture
 avoids those names.
+
+## Layout comparison
+
+`layout-js.js <web checkout> <vault> <out.json> [force|rings|timeline|galaxy]` runs the web
+version's layout (`layout-core.js` + d3) with the worker's settle rule. Draw it, and the Rust
+layout from `cargo run --release --example layout_bench -- <vault> --out rust.json`, with
+`cargo run --release --example draw_layout -- <graph.json> <positions.json> <out.png>`.
+Layouts are compared by eye: the starting points differ, so positions never match exactly.

@@ -1,7 +1,8 @@
 # v2 Native App Plan (Rust + wgpu, macOS first)
 
-Status: Phase 0 done (go), see [`phase0/README.md`](../phase0/README.md). Phase 1 (reader) done,
-see [Phase 1 results](#phase-1-results). Phases 2+ not started.
+Status: Phase 0 done (go), see [`phase0/README.md`](../phase0/README.md). Phase 1 (reader) and
+Phase 2 (layout) done, see [Phase 1 results](#phase-1-results) and [Phase 2 results](#phase-2-results).
+Phases 3+ not started.
 
 File names such as `parser.js`, `layout-core.js`, `settings.html`, `scripts/smoke.js` and `docs/presets/`
 refer to the web version, which lives on in
@@ -175,6 +176,25 @@ Done 2026-11-05 in `crates/core` (`vw_core::vault`).
 - **Done when:** a side-by-side screenshot against the current version looks like the same graph,
   a 35k-note layout converges on a background thread without dropping frames, and a relaunch shows the
   settled graph in the first frame.
+
+#### Phase 2 results
+Done 2026-11-06 in `crates/core` (`vw_core::layout`).
+- A port of the web version's d3 setup: link springs, Barnes-Hut repulsion, centring,
+  collision and tag clustering, with the same size tiers, plus the rings, timeline and galaxy
+  target layouts. Deterministic: the same vault always gives the same picture.
+- Side by side with d3 on the real vault, the shapes match (images in
+  [`docs/phase2/`](phase2/)). Same number of ticks to settle; 2.7–4× faster per tick, and
+  about 5× on 35,000 notes (3.7 s versus 19.7 s).
+- Runs on its own thread at utility priority (efficiency cores), publishes moving frames at a
+  set rate and always a final settled frame.
+- Positions are cached. A relaunch shows the settled layout in 3 ms for the real vault and
+  42 ms for 35,000 notes, with no layout work.
+- Change from the web version, for lightness: after an edit, only changed notes and their
+  direct neighbours move; everything else stays pinned. One new note relaxes in 72 ms on the
+  real vault (550 ms at 35,000) and the rest of the graph moves 0 px. A big change (over a
+  fifth of the graph) still relaxes everything.
+- Possible later: at 35,000 notes the local relax rebuilds the whole quadtree every tick;
+  building it once for the pinned nodes would make edits there much cheaper.
 
 ### Phase 3: Renderer foundation (M)
 **You get:** a working native wallpaper with the plain look, already lighter than today.
