@@ -2230,6 +2230,7 @@ name = "vw-render"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "libc",
  "png",
  "pollster",
  "vw-core",
