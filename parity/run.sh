@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Parity test: the Rust reader must produce the same graph and excerpts as the web
-# version's parser.js.
+# version's parser.js, and the config store must accept and clean configs the same way.
 #
 #   parity/run.sh <path-to-obsidian-live-wallpaper> [extra vault [ignore...]]
 #
@@ -33,6 +33,8 @@ node "$here/make-fixture.js" "$work/fixture" > /dev/null
 check "fixture" "$work/fixture" --ignore templates --ignore archive/old
 check "fixture, no unresolved" "$work/fixture" --ignore templates --ignore archive/old --no-unresolved
 check "fixture, no ignores" "$work/fixture"
+
+printf '%-32s ' "config"; node "$here/config-js.js" "$web" || fail=1
 
 if [ $# -ge 2 ]; then
   vault=$2; shift 2

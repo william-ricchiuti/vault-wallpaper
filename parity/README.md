@@ -22,6 +22,28 @@ Known difference, on purpose: notes named `toString`, or links like `[[construct
 crash `parser.js` (it uses plain objects as lookup tables) but work in Rust. The fixture
 avoids those names.
 
+## Config
+
+`config-js.js <web checkout>` (also run by `run.sh`) feeds configs through `parser.js`'s
+`sanitizePersistedConfig` and `sanitizeConfigPatch` and checks `vw_core::config` against
+them: every `presets.json` entry (as a patch and as a whole file), `config.example.json`,
+every theme id, and about 150 deliberately bad values (wrong types, out-of-range
+numbers, `null`s, bad nested `labelStyle`/`safeArea`/`rotate`, UTF-16 length and JS
+`trim` edge cases, non-object roots).
+
+- Patches must match exactly: same accept/reject, same cleaned values.
+- Whole files differ on purpose: the web version rejects a file with one bad key, the
+  native app drops that key and keeps the rest. So Rust must flag a file as clean exactly
+  when `parser.js` accepts it, drop exactly the keys `parser.js` refuses, and produce what
+  `parser.js` gives for the file without them.
+- `port`, `refreshMs`, `fastHash` and `renderer` are checked for accept/reject only;
+  the native app never keeps them.
+- Not compared: `vaultPath` existence (`parser.js` requires the folder to exist; Rust
+  leaves that to the app) and a missing `vaultPath` (required on the web, optional
+  natively until the user picks a vault).
+
+Results on 2026-11-05: 414 cases identical (213 files, 201 patches, 34 presets).
+
 ## Layout comparison
 
 `layout-js.js <web checkout> <vault> <out.json> [force|rings|timeline|galaxy]` runs the web
