@@ -7,7 +7,11 @@ edition = "2024"
 objc2 = "0.6.5"
 objc2-app-kit = "0.3.2"
 objc2-foundation = "0.3.2"
+objc2-quartz-core = { version = "0.3", features = ["CALayer", "CAMetalLayer", "CAAnimation", "CAMediaTiming", "CAMediaTimingFunction", "CAFrameRateRange", "CATransaction", "objc2-core-foundation"] }
+objc2-service-management = "0.3"
 raw-window-handle = "0.6.2"
+rfd = "0.17.2"
+tray-icon = "0.26.1"
 vw-core = { version = "0.1.0", path = "../core" }
 vw-render = { version = "0.1.0", path = "../render" }
 wgpu = "30.0.1"

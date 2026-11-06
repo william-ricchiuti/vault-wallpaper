@@ -46,3 +46,31 @@ pub fn is_visible(window: &NSWindow) -> bool {
 pub fn low_power_mode() -> bool {
     objc2_foundation::NSProcessInfo::processInfo().isLowPowerModeEnabled()
 }
+
+/// Start at Login, through `SMAppService` (macOS 13+). Only works from the bundled
+/// app; a bare binary gets an error back.
+pub mod login {
+    use objc2_service_management::{SMAppService, SMAppServiceStatus};
+
+    pub fn enabled() -> bool {
+        let service = unsafe { SMAppService::mainAppService() };
+        let status = unsafe { service.status() };
+        status == SMAppServiceStatus::Enabled
+    }
+
+    pub fn set(on: bool) -> Result<(), String> {
+        let service = unsafe { SMAppService::mainAppService() };
+        let result = if on { unsafe { service.registerAndReturnError() } } else { unsafe { service.unregisterAndReturnError() } };
+        result.map_err(|e| e.localizedDescription().to_string())
+    }
+}
+
+/// Shows a file in Finder.
+pub fn reveal(path: &std::path::Path) {
+    let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+}
+
+/// Opens a file with its default app.
+pub fn open(path: &std::path::Path) {
+    let _ = std::process::Command::new("open").arg(path).spawn();
+}

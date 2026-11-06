@@ -12,6 +12,8 @@
 //! breathes. A settled, still wallpaper draws nothing at all.
 
 mod desktop;
+mod menu;
+mod overlay;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,9 +24,12 @@ use objc2_app_kit::NSWindow;
 use vw_core::config::{self, Config, ConfigWatcher};
 use vw_core::layout::{LayoutEngine, LayoutFrame, LayoutGraph};
 use vw_core::vault::{Graph, Vault, VaultWatcher, watch};
+use menu::{Action, AppMenu};
+use overlay::GlowOverlay;
+use tray_icon::menu::MenuEvent;
 use vw_render::{
     Framing, FramingOptions, Gpu, Look, LookContext, SceneStyle, WallpaperRenderer, build_scene, derive_look, preferred_format,
-    style_from_config,
+    render_rgba, style_from_config, write_png,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -41,6 +46,7 @@ enum AppEvent {
     Graph(Box<Graph>),
     Layout(Box<LayoutFrame>),
     Config(Box<Config>),
+    Menu(MenuEvent),
 }
 
 struct Args {
@@ -98,6 +104,8 @@ struct Screen {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     renderer: WallpaperRenderer,
+    /// Glow in its own layer, so Core Animation can breathe it without frames.
+    overlay: Option<GlowOverlay>,
     /// The cached scene is out of date (graph, positions, look, config or size).
     scene_dirty: bool,
     /// The screen needs a composite (after a scene change, or an animation step).
@@ -137,7 +145,12 @@ struct App {
     _vault_watcher: Option<VaultWatcher>,
     _config_watcher: Option<ConfigWatcher>,
     started: Instant,
-    next_anim: Option<Instant>,
+    /// When Low Power Mode was last checked while breathing.
+    power_checked: Instant,
+    low_power: bool,
+    menu: Option<AppMenu>,
+    /// Paused from the menu: keep the last frame, draw nothing new.
+    paused: bool,
 }
 
 impl App {
@@ -255,10 +268,31 @@ impl App {
     fn apply_style(&mut self) {
         self.style = style_from_config(&self.cfg, false);
         self.framing = FramingOptions::from_config(&self.cfg);
-        self.next_anim = None;
+        self.update_breathing();
+    }
+
+    /// Breathing as Core Animation should run it now: off when paused, in Low Power
+    /// Mode, or when the style doesn't breathe.
+    fn breathing(&self) -> Option<(f32, f32, f32)> {
+        if self.paused || self.low_power || !self.style.animates() {
+            return None;
+        }
+        self.style.breathing.map(|(depth, period)| (depth, period, self.style.motion_fps))
+    }
+
+    fn update_breathing(&mut self) {
+        let b = if stepped_breathing() { None } else { self.breathing() };
+        for s in &mut self.screens {
+            if let Some(o) = &mut s.overlay {
+                o.set_breathing(b);
+            }
+        }
     }
 
     fn invalidate_scene(&mut self) {
+        if self.paused {
+            return;
+        }
         for s in &mut self.screens {
             s.scene_dirty = true;
             s.frame_dirty = true;
@@ -308,12 +342,26 @@ impl App {
         };
         surface.configure(&gpu.device, &config);
         let renderer = WallpaperRenderer::new(gpu, format);
-        self.screens.push(Screen { window, ns_window, surface, config, renderer, scene_dirty: true, frame_dirty: true, visible: true });
+        let overlay = ns_window.as_deref().and_then(|w| GlowOverlay::new(gpu, w, format));
+        if overlay.is_none() {
+            eprintln!("glow overlay unavailable; glow will not breathe");
+        }
+        self.screens.push(Screen {
+            window,
+            ns_window,
+            surface,
+            config,
+            renderer,
+            overlay,
+            scene_dirty: true,
+            frame_dirty: true,
+            visible: true,
+        });
     }
 
     fn draw(&mut self, id: WindowId) {
+        let breathing = self.breathing();
         let Some(gpu) = &self.gpu else { return };
-        let t = self.started.elapsed().as_secs_f64();
         let Some(s) = self.screens.iter_mut().find(|s| s.window.id() == id) else { return };
         if !s.frame_dirty || !s.check_visible() {
             // Nothing new, or hidden: a hidden screen stays dirty and draws when seen.
@@ -346,33 +394,86 @@ impl App {
             s.scene_dirty = false;
         }
         let view = frame.texture.create_view(&Default::default());
-        s.renderer.composite(gpu, &view, &self.style, self.style.breath(t));
+        match &mut s.overlay {
+            Some(o) => {
+                s.renderer.composite_scene_only(gpu, &view, &self.style);
+                o.draw(gpu, &s.renderer, &self.style);
+                o.set_breathing(if stepped_breathing() { None } else { breathing });
+            }
+            None => s.renderer.composite(gpu, &view, &self.style, 1.0),
+        }
         s.window.pre_present_notify();
         gpu.queue.present(frame);
         s.frame_dirty = false;
     }
 
-    /// Breathing glow: composite-only frames at the motion frame rate, and only while
-    /// a screen is visible and the Mac isn't in Low Power Mode. Returns when to wake.
-    fn animate(&mut self, now: Instant) -> Option<Instant> {
-        if !self.style.animates() || desktop::low_power_mode() || self.shown.is_none() {
-            return None;
-        }
-        if !self.screens.iter_mut().any(|s| s.check_visible()) {
-            // Nothing to see: look again in a second.
-            self.next_anim = None;
-            return Some(now + Duration::from_secs(1));
-        }
-        let step = Duration::from_secs_f32(1.0 / self.style.motion_fps);
-        let due = *self.next_anim.get_or_insert(now);
-        if now >= due {
-            for s in self.screens.iter_mut().filter(|s| s.visible) {
-                s.frame_dirty = true;
-                s.window.request_redraw();
+    fn on_action(&mut self, action: Action, event_loop: &ActiveEventLoop) {
+        match action {
+            Action::TogglePause => {
+                self.paused = !self.paused;
+                if let Some(m) = &self.menu {
+                    m.set_paused(self.paused);
+                }
+                self.update_breathing();
+                self.invalidate_scene();
             }
-            self.next_anim = Some((due + step).max(now));
+            Action::ChooseVault => {
+                let picked = rfd::FileDialog::new().set_title("Choose your Obsidian vault").pick_folder();
+                if let Some(dir) = picked {
+                    let mut cfg = self.cfg.clone();
+                    cfg.vault_path = Some(dir.to_string_lossy().into_owned());
+                    self.args.vault = None;
+                    // The config watcher picks the change up and rescans.
+                    if let Err(e) = config::save(&self.args.config, &cfg) {
+                        eprintln!("could not save the config: {e}");
+                    }
+                }
+            }
+            // The settings window lands in Phase 5; until then, the file itself.
+            Action::OpenSettings | Action::OpenConfigFile => {
+                if !self.args.config.exists() && config::save(&self.args.config, &self.cfg).is_err() {
+                    return;
+                }
+                desktop::open(&self.args.config);
+            }
+            Action::ExportPng => match self.export_png() {
+                Ok(path) => desktop::reveal(&path),
+                Err(e) => eprintln!("export failed: {e}"),
+            },
+            Action::ToggleLogin => {
+                let want = !desktop::login::enabled();
+                if let Err(e) = desktop::login::set(want) {
+                    eprintln!("start at login: {e}");
+                    if let Some(m) = &self.menu {
+                        m.set_status("Start at Login needs the installed app");
+                    }
+                }
+                if let Some(m) = &self.menu {
+                    m.set_login(desktop::login::enabled());
+                }
+            }
+            Action::Quit => event_loop.exit(),
         }
-        self.next_anim
+    }
+
+    /// Renders the first screen's current picture to a PNG in ~/Pictures/Vault Wallpaper.
+    fn export_png(&self) -> Result<PathBuf, String> {
+        let (Some(gpu), Some(screen), Some(sh)) = (&self.gpu, self.screens.first(), &self.shown) else {
+            return Err("nothing to export yet".into());
+        };
+        let scale = screen.window.scale_factor() as f32;
+        let size = [screen.config.width, screen.config.height];
+        let points = [size[0] as f32 / scale, size[1] as f32 / scale];
+        let framing = Framing::fit(&sh.positions, points[0], points[1], &self.framing);
+        let data = build_scene(&sh.layout, &sh.look, &sh.positions, &framing, &self.style, points);
+        let rgba = render_rgba(gpu, size, scale, &self.style, &data, 1.0);
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        let dir = home.join("Pictures/Vault Wallpaper");
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let path = dir.join(format!("vault-wallpaper-{stamp}.png"));
+        write_png(&path, size, &rgba).map_err(|e| e.to_string())?;
+        Ok(path)
     }
 }
 
@@ -385,14 +486,30 @@ impl ApplicationHandler<AppEvent> for App {
             self.add_screen(event_loop, m.position(), m.size());
         }
         eprintln!("[{:.0} ms] {} screen(s), low power mode {}", self.ms(), self.screens.len(), desktop::low_power_mode());
+        let proxy = self.proxy.clone();
+        self.menu = AppMenu::new(desktop::login::enabled(), move |e| {
+            let _ = proxy.send_event(AppEvent::Menu(e));
+        });
+        if self.menu.is_none() {
+            eprintln!("menu bar icon could not be created");
+        }
         self.start_background();
+        if self.vault_path().is_none() {
+            // First run: nothing to show until a vault is picked.
+            self.on_action(Action::ChooseVault, event_loop);
+        }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
             AppEvent::Graph(g) => self.send_graph(*g),
             AppEvent::Layout(f) => self.on_layout(*f),
             AppEvent::Config(c) => self.on_config(*c),
+            AppEvent::Menu(e) => {
+                if let Some(action) = self.menu.as_ref().and_then(|m| m.action(&e)) {
+                    self.on_action(action, event_loop);
+                }
+            }
         }
     }
 
@@ -413,6 +530,9 @@ impl ApplicationHandler<AppEvent> for App {
                     s.config.width = size.width.max(1);
                     s.config.height = size.height.max(1);
                     s.surface.configure(&gpu.device, &s.config);
+                    if let (Some(o), Some(w)) = (&s.overlay, &s.ns_window) {
+                        o.fit(w);
+                    }
                     s.scene_dirty = true;
                     s.frame_dirty = true;
                     s.window.request_redraw();
@@ -436,7 +556,30 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
         }
-        if let Some(next) = self.animate(now) {
+        // Experiment: step the overlay's opacity from here at the motion frame rate.
+        if stepped_breathing() && let Some((depth, period, fps)) = self.breathing() {
+            let t = self.started.elapsed().as_secs_f64();
+            let v = 1.0 - depth * 0.5 * (1.0 - (t * std::f64::consts::TAU / f64::from(period)).cos() as f32);
+            for s in &self.screens {
+                if let (Some(o), true) = (&s.overlay, s.visible) {
+                    o.set_opacity(v);
+                }
+            }
+            let next = now + Duration::from_secs_f32(1.0 / fps);
+            wake = Some(wake.map_or(next, |w| w.min(next)));
+        }
+        // While breathing, look at Low Power Mode once a minute and stop or restart
+        // the animation to match. Nothing else wakes a still wallpaper.
+        if self.style.animates() && !self.paused {
+            if now.duration_since(self.power_checked) >= Duration::from_secs(60) {
+                self.power_checked = now;
+                let low = desktop::low_power_mode();
+                if low != self.low_power {
+                    self.low_power = low;
+                    self.update_breathing();
+                }
+            }
+            let next = self.power_checked + Duration::from_secs(60);
             wake = Some(wake.map_or(next, |w| w.min(next)));
         }
         event_loop.set_control_flow(match wake {
@@ -444,6 +587,10 @@ impl ApplicationHandler<AppEvent> for App {
             None => ControlFlow::Wait,
         });
     }
+}
+
+fn stepped_breathing() -> bool {
+    std::env::var_os("VW_STEPPED").is_some()
 }
 
 fn main() {
@@ -468,7 +615,10 @@ fn main() {
         _vault_watcher: None,
         _config_watcher: None,
         started: Instant::now(),
-        next_anim: None,
+        power_checked: Instant::now(),
+        low_power: desktop::low_power_mode(),
+        menu: None,
+        paused: false,
     };
     event_loop.run_app(&mut app).expect("run");
 }

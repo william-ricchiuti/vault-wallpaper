@@ -218,8 +218,10 @@ Done 2026-11-06: `crates/render` (`vw-render`) and the app, `crates/app` (`vault
   layout cache is settled and drawn 0.3 s after launch. Memory 58–85 MB in one process,
   versus 300–520 MB plus a 46 MB Node server for the web version. About 0.2% CPU once
   settled.
-- Not yet: display hot-plug, the soak test result (below), config (parallel session),
-  colours and options beyond the plain look (Phase 4).
+- Soak test, 30 minutes as the real wallpaper with live vault edits: memory 57–85 MB (it rises
+  on a redraw and drops back; no leak), 3.3 s CPU in total (about 0.18%), 8 redraws, no
+  crashes.
+- Not yet: display hot-plug.
 
 ### Phase 4: Default look at full quality (L)
 **You get:** everything the default renderer does today, looking better. This unlocks all 18

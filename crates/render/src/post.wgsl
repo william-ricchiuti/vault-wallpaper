@@ -73,3 +73,21 @@ fn hash(p: vec2<f32>) -> f32 {
   }
   return vec4<f32>(c, 1.0);
 }
+
+// Glow alone, premultiplied, for a separate overlay layer that Core Animation fades
+// up and down (breathing without the app drawing a single frame). "Over" with
+// alpha = brightest channel approximates the screen blend of `composite_fs`.
+@fragment fn glow_overlay_fs(in: BgOut) -> @location(0) vec4<f32> {
+  var g: vec3<f32>;
+  if (comp.chroma > 0.0) {
+    let off = (in.uv - 0.5) * comp.glow_texel * comp.chroma;
+    g = vec3<f32>(
+      textureSample(glow_tex, smp, in.uv + off).r,
+      textureSample(glow_tex, smp, in.uv).g,
+      textureSample(glow_tex, smp, in.uv - off).b);
+  } else {
+    g = textureSample(glow_tex, smp, in.uv).rgb;
+  }
+  let c = clamp(g * comp.glow, vec3<f32>(0.0), vec3<f32>(1.0));
+  return vec4<f32>(c, max(c.r, max(c.g, c.b)));
+}

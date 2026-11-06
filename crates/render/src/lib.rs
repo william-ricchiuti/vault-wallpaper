@@ -176,6 +176,7 @@ struct Pipelines {
     glow: wgpu::RenderPipeline,
     blur: wgpu::RenderPipeline,
     composite: wgpu::RenderPipeline,
+    glow_overlay: wgpu::RenderPipeline,
     scene_layout: wgpu::BindGroupLayout,
     blur_layout: wgpu::BindGroupLayout,
     composite_layout: wgpu::BindGroupLayout,
@@ -247,6 +248,7 @@ impl Pipelines {
             glow: make(&scene_mod, &scene_layout, "node_vs", "glow_fs", std::slice::from_ref(&node), GLOW_FORMAT, additive),
             blur: make(&post_mod, &blur_layout, "full_vs", "blur_fs", &[], GLOW_FORMAT, None),
             composite: make(&post_mod, &composite_layout, "full_vs", "composite_fs", &[], out_format, None),
+            glow_overlay: make(&post_mod, &composite_layout, "full_vs", "glow_overlay_fs", &[], out_format, None),
             scene_layout,
             blur_layout,
             composite_layout,
@@ -451,12 +453,41 @@ impl WallpaperRenderer {
     }
 
     /// Draws the cached layers onto `view`. `breath` scales the glow (1 = as
-    /// configured); this is all an animated frame costs.
+    /// configured).
     pub fn composite(&self, gpu: &Gpu, view: &wgpu::TextureView, style: &SceneStyle, breath: f32) {
+        let glow = if self.has_glow { style.glow * breath } else { 0.0 };
+        self.post(gpu, view, style, glow, &self.pipelines.composite);
+    }
+
+    /// Draws the scene without glow: for screens whose glow lives in a separate
+    /// overlay layer (see [`Self::render_glow_overlay`]).
+    pub fn composite_scene_only(&self, gpu: &Gpu, view: &wgpu::TextureView, style: &SceneStyle) {
+        self.post(gpu, view, style, 0.0, &self.pipelines.composite);
+    }
+
+    /// Draws the glow alone, premultiplied, into a target of [`Self::glow_size`]
+    /// pixels. Shown in a layer above the scene, it lets Core Animation do the
+    /// breathing.
+    pub fn render_glow_overlay(&self, gpu: &Gpu, view: &wgpu::TextureView, style: &SceneStyle) {
+        let glow = if self.has_glow { style.glow } else { 0.0 };
+        self.post(gpu, view, style, glow, &self.pipelines.glow_overlay);
+    }
+
+    /// True when the last scene has a glow layer worth showing.
+    pub fn has_glow(&self) -> bool {
+        self.has_glow
+    }
+
+    /// Size in pixels of the glow layer for the last scene.
+    pub fn glow_size(&self) -> Option<[u32; 2]> {
+        self.targets.as_ref().map(|t| [t.size[0].div_ceil(GLOW_DOWNSCALE), t.size[1].div_ceil(GLOW_DOWNSCALE)])
+    }
+
+    fn post(&self, gpu: &Gpu, view: &wgpu::TextureView, style: &SceneStyle, glow: f32, pipeline: &wgpu::RenderPipeline) {
         let Some(t) = &self.targets else { return };
         let glow_px = [t.size[0].div_ceil(GLOW_DOWNSCALE) as f32, t.size[1].div_ceil(GLOW_DOWNSCALE) as f32];
         let u = CompositeUniforms {
-            glow: if self.has_glow { style.glow * breath } else { 0.0 },
+            glow,
             chroma: style.chromatic,
             vignette: style.vignette,
             grain: style.grain,
@@ -467,7 +498,7 @@ impl WallpaperRenderer {
         let mut enc = gpu.device.create_command_encoder(&Default::default());
         {
             let mut pass = begin(&mut enc, view, "composite");
-            pass.set_pipeline(&self.pipelines.composite);
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &t.composite, &[]);
             pass.draw(0..3, 0..1);
         }
