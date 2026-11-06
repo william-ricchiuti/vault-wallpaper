@@ -6,14 +6,18 @@
 //! wallpaper costs nothing between frames.
 
 mod framing;
+mod look;
 mod scene;
+mod text;
 
 use std::path::Path;
 
 use bytemuck::{Pod, Zeroable};
 
 pub use framing::{Framing, FramingMode, FramingOptions, SafeArea};
+pub use look::{LabelPick, Look, LookContext, derive_look};
 pub use scene::{SceneStyle, build_instances, parse_hex, tag_color};
+pub use text::{Anchor, FontFamily, TextItem, TextRenderer, TextStyle};
 
 /// One link, in screen points.
 #[repr(C)]
