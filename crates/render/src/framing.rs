@@ -137,6 +137,27 @@ fn percentile_bounds(points: &[[f32; 2]]) -> Option<[f32; 4]> {
     Some([q(&xs, lo), q(&ys, lo), q(&xs, hi), q(&ys, hi)])
 }
 
+impl FramingOptions {
+    /// Framing as the config sets it (`framing`, `zoom`, `offsetX/Y`, `safeArea`).
+    pub fn from_config(cfg: &vw_core::config::Config) -> Self {
+        use vw_core::config::Framing as F;
+        let sa = &cfg.safe_area;
+        FramingOptions {
+            mode: match cfg.framing {
+                F::Center => FramingMode::Center,
+                F::Fill => FramingMode::Fill,
+                F::Left => FramingMode::Left,
+                F::Right => FramingMode::Right,
+                F::None => FramingMode::None,
+            },
+            zoom: cfg.zoom as f32,
+            offset_x: cfg.offset_x as f32,
+            offset_y: cfg.offset_y as f32,
+            safe_area: SafeArea { top: sa.top as f32, right: sa.right as f32, bottom: sa.bottom as f32, left: sa.left as f32 },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,26 +177,5 @@ mod tests {
         let pts = [[0.0, 0.0], [10.0, 0.0]];
         let f = Framing::fit(&pts, 3000.0, 2000.0, &FramingOptions::default());
         assert!(f.sx <= 2.2 + 1e-6);
-    }
-}
-
-impl FramingOptions {
-    /// Framing as the config sets it (`framing`, `zoom`, `offsetX/Y`, `safeArea`).
-    pub fn from_config(cfg: &vw_core::config::Config) -> Self {
-        use vw_core::config::Framing as F;
-        let sa = &cfg.safe_area;
-        FramingOptions {
-            mode: match cfg.framing {
-                F::Center => FramingMode::Center,
-                F::Fill => FramingMode::Fill,
-                F::Left => FramingMode::Left,
-                F::Right => FramingMode::Right,
-                F::None => FramingMode::None,
-            },
-            zoom: cfg.zoom as f32,
-            offset_x: cfg.offset_x as f32,
-            offset_y: cfg.offset_y as f32,
-            safe_area: SafeArea { top: sa.top as f32, right: sa.right as f32, bottom: sa.bottom as f32, left: sa.left as f32 },
-        }
     }
 }
