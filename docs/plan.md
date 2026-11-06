@@ -1,6 +1,7 @@
 # v2 Native App Plan (Rust + wgpu, macOS first)
 
-Status: Phase 0 done (go), see [`phase0/README.md`](../phase0/README.md). Phases 1+ not started.
+Status: Phase 0 done (go), see [`phase0/README.md`](../phase0/README.md). Phase 1 (reader) done,
+see [Phase 1 results](#phase-1-results). Phases 2+ not started.
 
 File names such as `parser.js`, `layout-core.js`, `settings.html`, `scripts/smoke.js` and `docs/presets/`
 refer to the web version, which lives on in
@@ -154,6 +155,18 @@ for the current version.
   and tags. This is the main guard against subtle regressions.
 - **Done when:** parity tests pass, a full scan of a 35k-note vault takes under a second warm, and an
   edit shows up in the graph snapshot within ~200 ms.
+
+#### Phase 1 results
+Done 2026-11-05 in `crates/core` (`vw_core::vault`).
+- Parity with `parser.js`: identical graphs and excerpts on the edge-case fixture, the
+  Willy-AI vault and a 35,000-note synthetic vault ([`parity/`](../parity/README.md)).
+- Full scan, warm cache: about 30–60 ms for the real vault (2,597 notes) and 0.5–0.9 s for
+  35,000 notes. Building the graph takes 3.4 ms and 45 ms.
+- Save to new graph: 110–140 ms on small vaults, 170–300 ms on 35,000 notes. The web version
+  waits at least 700 ms by design (300 ms write-settle plus 400 ms debounce).
+- Lessons: macOS reports a moved folder by its new name only, so the reader re-checks which
+  notes still exist after any folder event, and does a full rescan when FSEvents says
+  events were dropped.
 
 ### Phase 2: Layout (M)
 **You get:** the graph has the familiar shape, opens instantly and doesn't wobble at every launch.
