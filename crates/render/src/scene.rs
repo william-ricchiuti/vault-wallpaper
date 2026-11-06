@@ -46,32 +46,25 @@ pub struct SceneStyle {
 
 /// The web version's per-size tuning (`sceneTuning`): bigger vaults get subtler,
 /// cheaper effects.
+/// The parts of the web version's per-size tuning (`sceneTuning`) the renderer
+/// applies itself; link opacity, halo strength and label counts come with the [`Look`].
 #[derive(Debug, Clone, Copy)]
 struct Tuning {
     glow_scale: f32,
     depth_of_field: bool,
-    link_opacity: f32,
-    halo_alpha: f32,
-    halo_radius: f32,
 }
 
 fn tuning(style: &SceneStyle, nodes: usize, links: usize) -> Tuning {
-    let plain = Tuning { glow_scale: 1.0, depth_of_field: style.depth_of_field, link_opacity: 1.0, halo_alpha: 0.11, halo_radius: 1.0 };
     if !style.auto_scale {
-        return plain;
+        return Tuning { glow_scale: 1.0, depth_of_field: style.depth_of_field };
     }
     let (dense, huge) = (nodes > 350 || links > 1200, nodes > 900 || links > 3200);
-    let (massive, ultra) = (nodes > 3000 || links > 10000, nodes > 10000 || links > 40000);
-    if ultra || massive {
-        let link_opacity = if ultra { 0.32 } else { 0.42 };
-        return Tuning { glow_scale: 0.0, depth_of_field: false, link_opacity, halo_alpha: 0.0, halo_radius: 1.0 };
+    if nodes > 3000 || links > 10000 {
+        return Tuning { glow_scale: 0.0, depth_of_field: false };
     }
     Tuning {
         glow_scale: if huge { 0.82 } else if dense { 0.92 } else { 1.0 },
         depth_of_field: style.depth_of_field && !huge,
-        link_opacity: if huge { 0.78 } else if dense { 0.9 } else { 1.0 },
-        halo_alpha: if huge { 0.05 } else if dense { 0.08 } else { 0.11 },
-        halo_radius: if huge { 0.85 } else if dense { 0.95 } else { 1.0 },
     }
 }
 
@@ -200,8 +193,8 @@ pub fn build_scene(
     let tune = tuning(style, n, graph.links.len());
     let mut data = SceneData::default();
 
-    if style.halos && tune.halo_alpha > 0.0 {
-        data.halos = halos(look, &screen, n, tune);
+    if style.halos && look.halo_alpha > 0.0 {
+        data.halos = halos(look, &screen, n);
     }
 
     if style.edge_style != EdgeStyle::None {
@@ -212,7 +205,8 @@ pub fn build_scene(
             }
             let Some(&[r, g, b, a]) = look.edge_color.get(k) else { continue };
             let imp = importance(s).max(importance(t));
-            let mut alpha = a * tune.link_opacity * (0.3 + imp * 0.7);
+            // The look's alpha already carries linkOpacity, size scaling and importance.
+            let mut alpha = a;
             let mut width = 0.4 + imp * 0.6;
             if tune.depth_of_field {
                 let m = 1.0 - (dist(screen[s]) + dist(screen[t])) / 2.0 * 0.5;
@@ -257,19 +251,35 @@ pub fn build_scene(
         }
     }
 
-    if style.labels {
+    if style.labels && look.label_count > 0 {
+        // The web version's drawLabels: candidates in order, skipping any off-screen or
+        // overlapping an earlier label, until `label_count` are placed.
+        let mut placed: Vec<[f32; 4]> = Vec::new();
         for pick in &look.labels {
+            if placed.len() >= look.label_count as usize {
+                break;
+            }
             let i = pick.node as usize;
             if i >= n {
                 continue;
             }
             let r = look.node_radius.get(i).copied().unwrap_or(2.0);
+            let font = 11.0 + pick.importance * 3.0;
+            let w = (pick.text.chars().count() as f32 * font * 0.56).min(220.0) + 16.0;
+            let (x, y) = (screen[i][0], screen[i][1] + r + 4.0);
+            let rect = [x - w / 2.0, y - 4.0, x + w / 2.0, y + font * 1.3 + 4.0];
+            let off = rect[0] < 0.0 || rect[1] < 0.0 || rect[2] > size[0] || rect[3] > size[1];
+            let overlaps = placed.iter().any(|p| rect[0] < p[2] && p[0] < rect[2] && rect[1] < p[3] && p[1] < rect[3]);
+            if off || overlaps {
+                continue;
+            }
+            placed.push(rect);
             let [cr, cg, cb, _] = look.node_color.get(i).copied().unwrap_or([1.0; 4]);
             data.text.push(TextItem {
                 text: pick.text.clone(),
-                pos: [screen[i][0], screen[i][1] + r + 4.0],
+                pos: [x, y],
                 anchor: Anchor::TopCenter,
-                size: 11.0 + pick.importance * 3.0,
+                size: font,
                 color: [0.94, 0.94, 0.97, 0.92],
                 family: style.label_font,
                 style: style.label_style,
@@ -283,7 +293,7 @@ pub fn build_scene(
 
 /// The web version's cluster halos: one soft disc per tag group of 3 or more notes,
 /// at the group's centroid, sized by its spread and count.
-fn halos(look: &Look, screen: &[[f32; 2]], n: usize, tune: Tuning) -> Vec<NodeInstance> {
+fn halos(look: &Look, screen: &[[f32; 2]], n: usize) -> Vec<NodeInstance> {
     let groups = look.halo_color.len();
     if groups == 0 {
         return Vec::new();
@@ -301,14 +311,14 @@ fn halos(look: &Look, screen: &[[f32; 2]], n: usize, tune: Tuning) -> Vec<NodeIn
         a.5 = a.5.min(p[1]);
         a.6 = a.6.max(p[1]);
     }
-    let alpha = tune.halo_alpha;
+    let alpha = look.halo_alpha;
     let mut out: Vec<NodeInstance> = acc
         .iter()
         .enumerate()
         .filter(|(_, a)| a.0 >= 3)
         .map(|(g, a)| {
             let (w, h) = (a.4 - a.3, a.6 - a.5);
-            let radius = 56f32.max((w.max(h) * 0.72 + (a.0 as f32).sqrt() * 22.0) * tune.halo_radius);
+            let radius = 56f32.max((w.max(h) * 0.72 + (a.0 as f32).sqrt() * 22.0) * look.halo_radius_boost);
             let [r, gg, b] = look.halo_color[g];
             NodeInstance { center: [a.1 / a.0 as f32, a.2 / a.0 as f32], radius, color: [r, gg, b, alpha] }
         })

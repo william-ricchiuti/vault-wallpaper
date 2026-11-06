@@ -5,7 +5,9 @@
 //! server skips it entirely while the wallpaper is covered.
 //!
 //! Measured on 2026-11-06: breathing by redrawing frames cost ~216 MB of extra driver
-//! memory and ~2.5% CPU; this way costs neither.
+//! memory and ~2.5% app CPU; this way costs neither. The window server does some work
+//! while the layer breathes (noisy to measure, a few percent of a core at most);
+//! stepping the opacity from the app at 8 fps measured worse, so this stays.
 
 use std::ffi::c_void;
 
@@ -13,7 +15,7 @@ use objc2::rc::Retained;
 use objc2_app_kit::NSWindow;
 use objc2_foundation::{NSNumber, NSString};
 use objc2_quartz_core::{
-    CABasicAnimation, CAFrameRateRange, CALayer, CAMediaTiming, CAMediaTimingFunction, CAMetalLayer, CATransaction, kCAFilterLinear,
+    CABasicAnimation, CAFrameRateRange, CALayer, CAMediaTiming, CAMediaTimingFunction, CAMetalLayer, kCAFilterLinear,
     kCAMediaTimingFunctionEaseInEaseOut,
 };
 use vw_render::{Gpu, SceneStyle, WallpaperRenderer};
@@ -88,15 +90,6 @@ impl GlowOverlay {
         if let Some(host) = window.contentView().and_then(|v| v.layer()) {
             self.layer.setFrame(host.bounds());
         }
-    }
-
-    /// Sets the layer's opacity directly, with no implicit animation: the window
-    /// server recomposites once for this change and then rests.
-    pub fn set_opacity(&self, opacity: f32) {
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-        self.layer.setOpacity(opacity);
-        CATransaction::commit();
     }
 
     /// Starts, changes or stops the breathing animation. `None` stops it.

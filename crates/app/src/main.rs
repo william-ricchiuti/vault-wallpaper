@@ -281,7 +281,7 @@ impl App {
     }
 
     fn update_breathing(&mut self) {
-        let b = if stepped_breathing() { None } else { self.breathing() };
+        let b = self.breathing();
         for s in &mut self.screens {
             if let Some(o) = &mut s.overlay {
                 o.set_breathing(b);
@@ -398,7 +398,7 @@ impl App {
             Some(o) => {
                 s.renderer.composite_scene_only(gpu, &view, &self.style);
                 o.draw(gpu, &s.renderer, &self.style);
-                o.set_breathing(if stepped_breathing() { None } else { breathing });
+                o.set_breathing(breathing);
             }
             None => s.renderer.composite(gpu, &view, &self.style, 1.0),
         }
@@ -421,6 +421,10 @@ impl App {
                 let picked = rfd::FileDialog::new().set_title("Choose your Obsidian vault").pick_folder();
                 if let Some(dir) = picked {
                     let mut cfg = self.cfg.clone();
+                    if !self.args.config.exists() {
+                        // A new install starts still (lightness first); motion is opt-in.
+                        cfg.motion_mode = config::MotionMode::Still;
+                    }
                     cfg.vault_path = Some(dir.to_string_lossy().into_owned());
                     self.args.vault = None;
                     // The config watcher picks the change up and rescans.
@@ -556,18 +560,6 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
         }
-        // Experiment: step the overlay's opacity from here at the motion frame rate.
-        if stepped_breathing() && let Some((depth, period, fps)) = self.breathing() {
-            let t = self.started.elapsed().as_secs_f64();
-            let v = 1.0 - depth * 0.5 * (1.0 - (t * std::f64::consts::TAU / f64::from(period)).cos() as f32);
-            for s in &self.screens {
-                if let (Some(o), true) = (&s.overlay, s.visible) {
-                    o.set_opacity(v);
-                }
-            }
-            let next = now + Duration::from_secs_f32(1.0 / fps);
-            wake = Some(wake.map_or(next, |w| w.min(next)));
-        }
         // While breathing, look at Low Power Mode once a minute and stop or restart
         // the animation to match. Nothing else wakes a still wallpaper.
         if self.style.animates() && !self.paused {
@@ -587,10 +579,6 @@ impl ApplicationHandler<AppEvent> for App {
             None => ControlFlow::Wait,
         });
     }
-}
-
-fn stepped_breathing() -> bool {
-    std::env::var_os("VW_STEPPED").is_some()
 }
 
 fn main() {
