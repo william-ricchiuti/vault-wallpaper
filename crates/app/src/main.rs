@@ -1,10 +1,15 @@
 //! Vault Wallpaper: your Obsidian vault's graph, drawn behind the desktop icons.
 //!
-//!   vault-wallpaper --vault <path> [--front] [--cache <file>]
+//!   vault-wallpaper [--vault <path>] [--config <file>] [--front] [--cache <file>]
 //!
-//! Threads: the vault watcher and the layout engine run in the background and post
-//! results to the main thread, which draws only when something changed. A settled,
-//! unchanged wallpaper draws nothing at all.
+//! Settings come from `~/Library/Application Support/Vault Wallpaper/config.json`
+//! (the web version's format) and are reloaded when the file changes; `--vault`
+//! overrides the vault path.
+//!
+//! Threads: the vault watcher, the config watcher and the layout engine run in the
+//! background and post results to the main thread. The main thread redraws the cached
+//! scene only when something changed, and runs cheap composite-only frames while glow
+//! breathes. A settled, still wallpaper draws nothing at all.
 
 mod desktop;
 
@@ -14,9 +19,13 @@ use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
 use objc2_app_kit::NSWindow;
-use vw_core::layout::{LayoutEngine, LayoutFrame, LayoutGraph, LayoutOptions};
-use vw_core::vault::{Graph, Vault, VaultOptions, VaultWatcher, watch};
-use vw_render::{Framing, FramingOptions, Gpu, GraphRenderer, SceneStyle, build_instances, preferred_format};
+use vw_core::config::{self, Config, ConfigWatcher};
+use vw_core::layout::{LayoutEngine, LayoutFrame, LayoutGraph};
+use vw_core::vault::{Graph, Vault, VaultWatcher, watch};
+use vw_render::{
+    Framing, FramingOptions, Gpu, Look, LookContext, SceneStyle, WallpaperRenderer, build_scene, derive_look, preferred_format,
+    style_from_config,
+};
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::WindowEvent;
@@ -31,36 +40,55 @@ const LAYOUT_FPS: f64 = 12.0;
 enum AppEvent {
     Graph(Box<Graph>),
     Layout(Box<LayoutFrame>),
+    Config(Box<Config>),
 }
 
 struct Args {
-    vault: PathBuf,
+    vault: Option<PathBuf>,
+    config: PathBuf,
     front: bool,
     cache: PathBuf,
 }
 
+fn support_dir() -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    home.join("Library/Application Support/Vault Wallpaper")
+}
+
 fn parse_args() -> Args {
-    let mut vault = None;
-    let mut front = false;
-    let mut cache = None;
+    let mut args = Args {
+        vault: std::env::var_os("VW_VAULT").map(PathBuf::from),
+        config: config::default_path().unwrap_or_else(|| support_dir().join("config.json")),
+        front: false,
+        cache: support_dir().join("layout.json"),
+    };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--vault" => vault = it.next().map(PathBuf::from),
-            "--front" => front = true,
-            "--cache" => cache = it.next().map(PathBuf::from),
+            "--vault" => args.vault = it.next().map(PathBuf::from),
+            "--config" => args.config = it.next().map(PathBuf::from).expect("--config needs a path"),
+            "--front" => args.front = true,
+            "--cache" => args.cache = it.next().map(PathBuf::from).expect("--cache needs a path"),
             other => eprintln!("unknown argument: {other}"),
         }
     }
-    let Some(vault) = vault.or_else(|| std::env::var_os("VW_VAULT").map(PathBuf::from)) else {
-        eprintln!("usage: vault-wallpaper --vault <path> [--front] [--cache <file>]");
-        std::process::exit(2);
-    };
-    let cache = cache.unwrap_or_else(|| {
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-        home.join("Library/Application Support/Vault Wallpaper/layout.json")
-    });
-    Args { vault, front, cache }
+    args
+}
+
+fn load_config(path: &std::path::Path) -> Config {
+    match config::load(path) {
+        Ok(s) => {
+            for issue in &s.issues {
+                eprintln!("config: {} ({})", issue.key, issue.message);
+            }
+            s.config
+        }
+        Err(e) if e.is_not_found() => Config::default(),
+        Err(e) => {
+            eprintln!("config: {e}; using defaults");
+            Config::default()
+        }
+    }
 }
 
 /// One wallpaper window (one per display).
@@ -69,9 +97,11 @@ struct Screen {
     ns_window: Option<Retained<NSWindow>>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
-    renderer: GraphRenderer,
-    /// Something changed since this screen last drew.
-    dirty: bool,
+    renderer: WallpaperRenderer,
+    /// The cached scene is out of date (graph, positions, look, config or size).
+    scene_dirty: bool,
+    /// The screen needs a composite (after a scene change, or an animation step).
+    frame_dirty: bool,
     visible: bool,
 }
 
@@ -82,83 +112,156 @@ impl Screen {
     }
 }
 
+/// The graph a layout frame belongs to, with its look.
+struct Shown {
+    graph: Graph,
+    layout: LayoutGraph,
+    look: Look,
+    positions: Vec<[f32; 2]>,
+}
+
 struct App {
     args: Args,
     proxy: EventLoopProxy<AppEvent>,
-    gpu: Option<Gpu>,
-    screens: Vec<Screen>,
+    cfg: Config,
     style: SceneStyle,
     framing: FramingOptions,
+    gpu: Option<Gpu>,
+    screens: Vec<Screen>,
     /// Graphs sent to the layout engine, oldest first. The engine numbers its runs, so
     /// frame generation N belongs to the Nth graph sent.
-    sent: Vec<LayoutGraph>,
+    sent: Vec<(Graph, LayoutGraph)>,
     sent_base: u64,
-    current: Option<(LayoutGraph, Vec<[f32; 2]>)>,
+    shown: Option<Shown>,
     engine: Option<LayoutEngine>,
-    _watcher: Option<VaultWatcher>,
+    _vault_watcher: Option<VaultWatcher>,
+    _config_watcher: Option<ConfigWatcher>,
     started: Instant,
-    frames: u64,
+    next_anim: Option<Instant>,
 }
 
 impl App {
+    fn ms(&self) -> f64 {
+        self.started.elapsed().as_secs_f64() * 1000.0
+    }
+
+    fn vault_path(&self) -> Option<PathBuf> {
+        self.args.vault.clone().or_else(|| self.cfg.vault_path.as_ref().map(PathBuf::from))
+    }
+
     fn start_background(&mut self) {
         let proxy = self.proxy.clone();
-        let engine = LayoutEngine::spawn(
-            LayoutOptions::default(),
+        match config::watch(&self.args.config, self.cfg.clone(), move |c| {
+            let _ = proxy.send_event(AppEvent::Config(Box::new(c)));
+        }) {
+            Ok(w) => self._config_watcher = Some(w),
+            Err(e) => eprintln!("not watching the config: {e}"),
+        }
+        let proxy = self.proxy.clone();
+        self.engine = Some(LayoutEngine::spawn(
+            self.cfg.layout_options(),
             Some(self.args.cache.clone()),
             Duration::from_secs_f64(1.0 / LAYOUT_FPS),
             move |f| {
                 let _ = proxy.send_event(AppEvent::Layout(Box::new(f)));
             },
-        );
+        ));
+        self.open_vault();
+    }
+
+    /// (Re)scans the vault and starts watching it.
+    fn open_vault(&mut self) {
+        self._vault_watcher = None;
+        let Some(path) = self.vault_path() else {
+            eprintln!("no vault set: pass --vault or set vaultPath in {}", self.args.config.display());
+            return;
+        };
         let t = Instant::now();
-        let vault = Vault::scan(&self.args.vault, VaultOptions::default());
+        let vault = Vault::scan(&path, self.cfg.vault_options());
         eprintln!("[{:.0} ms] scanned {} notes in {:.0} ms", self.ms(), vault.len(), t.elapsed().as_secs_f64() * 1000.0);
         let graph = vault.graph();
         let proxy = self.proxy.clone();
         match watch(vault, move |g| {
             let _ = proxy.send_event(AppEvent::Graph(Box::new(g)));
         }) {
-            Ok(w) => self._watcher = Some(w),
+            Ok(w) => self._vault_watcher = Some(w),
             Err(e) => eprintln!("not watching the vault: {e}"),
         }
-        self.engine = Some(engine);
         self.send_graph(graph);
     }
 
-    fn ms(&self) -> f64 {
-        self.started.elapsed().as_secs_f64() * 1000.0
+    fn send_graph(&mut self, graph: Graph) {
+        let layout = LayoutGraph::from_graph(&graph);
+        if let Some(engine) = &self.engine {
+            engine.set_graph(graph.clone());
+        }
+        self.sent.push((graph, layout));
     }
 
-    fn send_graph(&mut self, graph: Graph) {
-        self.sent.push(LayoutGraph::from_graph(&graph));
-        if let Some(engine) = &self.engine {
-            engine.set_graph(graph);
-        }
+    fn look_for(&self, graph: &Graph, layout: &LayoutGraph) -> Look {
+        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64() * 1000.0);
+        derive_look(graph, layout, &self.cfg, &LookContext { now_ms, light: false })
     }
 
     fn on_layout(&mut self, frame: LayoutFrame) {
         // Drop graphs older than the one this frame was computed for.
-        let Some(index) = (frame.generation.checked_sub(1 + self.sent_base)).map(|i| i as usize) else { return };
+        let Some(index) = frame.generation.checked_sub(1 + self.sent_base).map(|i| i as usize) else { return };
         if index >= self.sent.len() {
             return;
         }
         self.sent.drain(..index);
         self.sent_base += index as u64;
-        let graph = &self.sent[0];
-        if graph.len() != frame.positions.len() {
+        let (graph, layout) = &self.sent[0];
+        if layout.len() != frame.positions.len() {
             return;
         }
         if frame.settled {
-            eprintln!("[{:.0} ms] layout settled ({} frames drawn so far)", self.ms(), self.frames);
+            eprintln!("[{:.0} ms] layout settled", self.ms());
         }
-        self.current = Some((graph.clone(), frame.positions));
-        self.mark_dirty();
+        // The look only depends on the graph and config: reuse it while positions move.
+        let same_graph = self.shown.as_ref().is_some_and(|s| s.layout.id == layout.id && s.layout.links == layout.links);
+        let (graph, layout) = (graph.clone(), layout.clone());
+        let look = match self.shown.take() {
+            Some(s) if same_graph => s.look,
+            _ => self.look_for(&graph, &layout),
+        };
+        self.shown = Some(Shown { graph, layout, look, positions: frame.positions });
+        self.invalidate_scene();
     }
 
-    fn mark_dirty(&mut self) {
+    fn on_config(&mut self, cfg: Config) {
+        let old_vault = self.vault_path();
+        let old = std::mem::replace(&mut self.cfg, cfg);
+        let vault_changed = self.vault_path() != old_vault
+            || old.ignore_paths != self.cfg.ignore_paths
+            || old.show_unresolved_links != self.cfg.show_unresolved_links;
+        if (old.layout != self.cfg.layout || old.cluster_by_tag != self.cfg.cluster_by_tag)
+            && let Some(engine) = &self.engine
+        {
+            engine.set_options(self.cfg.layout_options());
+        }
+        self.apply_style();
+        if let Some(s) = self.shown.take() {
+            let look = self.look_for(&s.graph, &s.layout);
+            self.shown = Some(Shown { look, ..s });
+        }
+        if vault_changed {
+            self.open_vault();
+        }
+        self.invalidate_scene();
+        eprintln!("[{:.0} ms] config reloaded", self.ms());
+    }
+
+    fn apply_style(&mut self) {
+        self.style = style_from_config(&self.cfg, false);
+        self.framing = FramingOptions::from_config(&self.cfg);
+        self.next_anim = None;
+    }
+
+    fn invalidate_scene(&mut self) {
         for s in &mut self.screens {
-            s.dirty = true;
+            s.scene_dirty = true;
+            s.frame_dirty = true;
             if s.check_visible() {
                 s.window.request_redraw();
             }
@@ -204,14 +307,15 @@ impl App {
             color_space: Default::default(),
         };
         surface.configure(&gpu.device, &config);
-        let renderer = GraphRenderer::new(gpu, format);
-        self.screens.push(Screen { window, ns_window, surface, config, renderer, dirty: true, visible: true });
+        let renderer = WallpaperRenderer::new(gpu, format);
+        self.screens.push(Screen { window, ns_window, surface, config, renderer, scene_dirty: true, frame_dirty: true, visible: true });
     }
 
     fn draw(&mut self, id: WindowId) {
         let Some(gpu) = &self.gpu else { return };
+        let t = self.started.elapsed().as_secs_f64();
         let Some(s) = self.screens.iter_mut().find(|s| s.window.id() == id) else { return };
-        if !s.dirty || !s.check_visible() {
+        if !s.frame_dirty || !s.check_visible() {
             // Nothing new, or hidden: a hidden screen stays dirty and draws when seen.
             return;
         }
@@ -228,21 +332,47 @@ impl App {
             }
         };
         let scale = s.window.scale_factor() as f32;
-        let (w, h) = (s.config.width, s.config.height);
-        match &self.current {
-            Some((graph, positions)) => {
-                let framing = Framing::fit(positions, w as f32 / scale, h as f32 / scale, &self.framing);
-                let (nodes, edges) = build_instances(graph, positions, &framing, &self.style);
-                s.renderer.upload(gpu, &nodes, &edges);
-            }
-            None => s.renderer.upload(gpu, &[], &[]),
+        let size = [s.config.width, s.config.height];
+        if s.scene_dirty {
+            let points = [size[0] as f32 / scale, size[1] as f32 / scale];
+            let data = match &self.shown {
+                Some(sh) => {
+                    let framing = Framing::fit(&sh.positions, points[0], points[1], &self.framing);
+                    build_scene(&sh.layout, &sh.look, &sh.positions, &framing, &self.style, points)
+                }
+                None => Default::default(),
+            };
+            s.renderer.set_scene(gpu, size, scale, &data, &self.style);
+            s.scene_dirty = false;
         }
         let view = frame.texture.create_view(&Default::default());
-        s.renderer.render(gpu, &view, [w, h], scale, &self.style);
+        s.renderer.composite(gpu, &view, &self.style, self.style.breath(t));
         s.window.pre_present_notify();
         gpu.queue.present(frame);
-        s.dirty = false;
-        self.frames += 1;
+        s.frame_dirty = false;
+    }
+
+    /// Breathing glow: composite-only frames at the motion frame rate, and only while
+    /// a screen is visible and the Mac isn't in Low Power Mode. Returns when to wake.
+    fn animate(&mut self, now: Instant) -> Option<Instant> {
+        if !self.style.animates() || desktop::low_power_mode() || self.shown.is_none() {
+            return None;
+        }
+        if !self.screens.iter_mut().any(|s| s.check_visible()) {
+            // Nothing to see: look again in a second.
+            self.next_anim = None;
+            return Some(now + Duration::from_secs(1));
+        }
+        let step = Duration::from_secs_f32(1.0 / self.style.motion_fps);
+        let due = *self.next_anim.get_or_insert(now);
+        if now >= due {
+            for s in self.screens.iter_mut().filter(|s| s.visible) {
+                s.frame_dirty = true;
+                s.window.request_redraw();
+            }
+            self.next_anim = Some((due + step).max(now));
+        }
+        self.next_anim
     }
 }
 
@@ -262,6 +392,7 @@ impl ApplicationHandler<AppEvent> for App {
         match event {
             AppEvent::Graph(g) => self.send_graph(*g),
             AppEvent::Layout(f) => self.on_layout(*f),
+            AppEvent::Config(c) => self.on_config(*c),
         }
     }
 
@@ -271,7 +402,7 @@ impl ApplicationHandler<AppEvent> for App {
             WindowEvent::Occluded(_) => {
                 if let Some(s) = self.screens.iter_mut().find(|s| s.window.id() == id)
                     && s.check_visible()
-                    && s.dirty
+                    && s.frame_dirty
                 {
                     s.window.request_redraw();
                 }
@@ -282,7 +413,8 @@ impl ApplicationHandler<AppEvent> for App {
                     s.config.width = size.width.max(1);
                     s.config.height = size.height.max(1);
                     s.surface.configure(&gpu.device, &s.config);
-                    s.dirty = true;
+                    s.scene_dirty = true;
+                    s.frame_dirty = true;
                     s.window.request_redraw();
                 }
             }
@@ -292,46 +424,51 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Only a screen that is hidden *and* has something new to show needs watching:
-        // check once a second (events alone can be missed). Otherwise sleep until the
-        // next event.
-        let mut waiting = false;
+        let now = Instant::now();
+        // A screen that is hidden *and* has something new to show is re-checked once a
+        // second (occlusion events alone can be missed).
+        let mut wake: Option<Instant> = None;
         for s in &mut self.screens {
-            if s.dirty && !s.visible {
-                waiting = true;
+            if s.frame_dirty && !s.visible {
+                wake = Some(now + Duration::from_secs(1));
                 if s.check_visible() {
                     s.window.request_redraw();
                 }
             }
         }
-        event_loop.set_control_flow(if waiting {
-            ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(1))
-        } else {
-            ControlFlow::Wait
+        if let Some(next) = self.animate(now) {
+            wake = Some(wake.map_or(next, |w| w.min(next)));
+        }
+        event_loop.set_control_flow(match wake {
+            Some(t) => ControlFlow::WaitUntil(t),
+            None => ControlFlow::Wait,
         });
     }
 }
 
 fn main() {
     let args = parse_args();
+    let cfg = load_config(&args.config);
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .with_activation_policy(ActivationPolicy::Accessory)
         .build()
         .expect("event loop");
     let mut app = App {
-        args,
         proxy: event_loop.create_proxy(),
+        style: style_from_config(&cfg, false),
+        framing: FramingOptions::from_config(&cfg),
+        cfg,
+        args,
         gpu: None,
         screens: Vec::new(),
-        style: SceneStyle::default(),
-        framing: FramingOptions::default(),
         sent: Vec::new(),
         sent_base: 0,
-        current: None,
+        shown: None,
         engine: None,
-        _watcher: None,
+        _vault_watcher: None,
+        _config_watcher: None,
         started: Instant::now(),
-        frames: 0,
+        next_anim: None,
     };
     event_loop.run_app(&mut app).expect("run");
 }

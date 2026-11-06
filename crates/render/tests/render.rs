@@ -2,7 +2,7 @@
 //! in the colour they should.
 
 use vw_core::layout::LayoutGraph;
-use vw_render::{Framing, Gpu, SceneStyle, build_instances, render_rgba, tag_color};
+use vw_render::{Framing, Gpu, Look, SceneStyle, build_scene, render_rgba, tag_color};
 
 fn px(rgba: &[u8], w: u32, x: u32, y: u32) -> [u8; 3] {
     let i = ((y * w + x) * 4) as usize;
@@ -28,11 +28,21 @@ fn draws_notes_links_and_background() {
         degree: vec![1, 1],
         radius: vec![4.0, 4.0],
     };
-    let positions = [[50.0, 60.0], [150.0, 60.0]];
-    let style = SceneStyle { background_glow: [0.0; 4], link_opacity: 1.0, link_width: 2.0, ..SceneStyle::default() };
-    let (nodes, edges) = build_instances(&graph, &positions, &Framing::IDENTITY, &style);
+    let positions = [[25.0, 30.0], [75.0, 30.0]];
+    let style = SceneStyle { background_glow: [0.0; 4], glow: 0.0, vignette: 0.0, grain: 0.0, halos: false, depth_of_field: false, ..SceneStyle::default() };
+    let [tr, tg, tb] = tag_color("work");
+    let [ar, ag, ab] = style.accent;
+    let look = Look {
+        node_color: vec![[tr, tg, tb, 0.95], [ar, ag, ab, 0.95]],
+        node_radius: vec![6.0, 6.0],
+        // Importance 1 makes links full width (1 pt) and full alpha.
+        node_importance: vec![1.0, 1.0],
+        edge_color: vec![[ar, ag, ab, 1.0]],
+        ..Look::default()
+    };
     let (w, h) = (200, 120);
-    let rgba = render_rgba(&gpu, [w, h], 1.0, &style, &nodes, &edges);
+    let data = build_scene(&graph, &look, &positions, &Framing::IDENTITY, &style, [w as f32 / 2.0, h as f32 / 2.0]);
+    let rgba = render_rgba(&gpu, [w, h], 2.0, &style, &data, 1.0);
     assert!(close(px(&rgba, w, 5, 5), style.background, 2), "background {:?}", px(&rgba, w, 5, 5));
     assert!(close(px(&rgba, w, 50, 60), tag_color("work"), 16), "tagged note {:?}", px(&rgba, w, 50, 60));
     assert!(close(px(&rgba, w, 150, 60), style.accent, 16), "untagged note {:?}", px(&rgba, w, 150, 60));

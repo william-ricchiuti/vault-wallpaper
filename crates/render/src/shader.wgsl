@@ -26,11 +26,17 @@ struct BgOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
   return o;
 }
 
+// The web version's radial gradient: accent-tinted centre, the background colour
+// halfway out, slightly darker at the rim (radius 0.72 of the larger side).
 @fragment fn bg_fs(in: BgOut) -> @location(0) vec4<f32> {
-  let aspect = u.size.x / u.size.y;
-  let d = length((in.uv - 0.5) * vec2<f32>(aspect, 1.0));
-  let lift = smoothstep(0.9, 0.0, d) * u.background_glow.a;
-  return vec4<f32>(mix(u.background.rgb, u.background_glow.rgb, lift), 1.0);
+  if (u.background_glow.a <= 0.0) {
+    return vec4<f32>(u.background.rgb, 1.0);
+  }
+  let px = (in.uv - 0.5) * u.size;
+  let t = clamp(length(px) / (max(u.size.x, u.size.y) * 0.72), 0.0, 1.0);
+  let rim = max(u.background.rgb - vec3<f32>(5.0 / 255.0), vec3<f32>(0.0));
+  let c = select(mix(u.background.rgb, rim, (t - 0.5) * 2.0), mix(u.background_glow.rgb, u.background.rgb, t * 2.0), t < 0.5);
+  return vec4<f32>(c, 1.0);
 }
 
 // ---- links ----
@@ -99,4 +105,20 @@ struct NodeOut {
 @fragment fn node_fs(in: NodeOut) -> @location(0) vec4<f32> {
   let cover = clamp((in.radius - length(in.local)) * u.scale + 0.5, 0.0, 1.0);
   return vec4<f32>(in.color.rgb, in.color.a * cover);
+}
+
+// ---- soft discs: cluster halos (alpha-blended into the scene) and node glow
+// (added into the low-resolution glow layer) ----
+fn soft(in: NodeOut) -> f32 {
+  let t = length(in.local) / max(in.radius, 1e-3);
+  return in.color.a * exp(-t * t * 3.0) * (1.0 - smoothstep(0.85, 1.0, t));
+}
+
+@fragment fn halo_fs(in: NodeOut) -> @location(0) vec4<f32> {
+  return vec4<f32>(in.color.rgb, soft(in));
+}
+
+@fragment fn glow_fs(in: NodeOut) -> @location(0) vec4<f32> {
+  let a = soft(in);
+  return vec4<f32>(in.color.rgb * a, a);
 }

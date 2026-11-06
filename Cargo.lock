@@ -2232,6 +2232,7 @@ dependencies = [
  "bytemuck",
  "png",
  "pollster",
+ "serde_json",
  "vw-core",
  "wgpu",
 ]

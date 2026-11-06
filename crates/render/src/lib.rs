@@ -1,9 +1,16 @@
 //! The GPU renderer: turns a laid-out graph into pixels, on a window surface or an
 //! off-screen texture (PNG export and image tests).
 //!
-//! Lightness: nothing here runs on its own. The app asks for a frame only when
-//! something changed (new positions, a resize, a config change), so a still
-//! wallpaper costs nothing between frames.
+//! Lightness: rendering is split in two.
+//! 1. [`WallpaperRenderer::set_scene`] draws everything that only changes with the
+//!    graph, layout, config or screen size: background, halos, links, notes and text
+//!    into a full-resolution scene texture, and node glow into a quarter-resolution
+//!    texture that is then blurred. This runs rarely.
+//! 2. [`WallpaperRenderer::composite`] combines those cached textures with glow
+//!    strength, vignette and grain onto the screen. It is the only work an animated
+//!    frame (glow breathing) does: a few texture reads per pixel.
+//!
+//! Nothing here runs on its own; the app asks for frames.
 
 mod framing;
 mod look;
@@ -16,8 +23,15 @@ use bytemuck::{Pod, Zeroable};
 
 pub use framing::{Framing, FramingMode, FramingOptions, SafeArea};
 pub use look::{LabelPick, Look, LookContext, derive_look};
-pub use scene::{SceneStyle, build_instances, parse_hex, tag_color};
+pub use scene::{EdgeStyle, SceneData, SceneStyle, build_scene, parse_hex, style_from_config, tag_color};
 pub use text::{Anchor, FontFamily, TextItem, TextRenderer, TextStyle};
+
+/// Format of the cached scene texture.
+const SCENE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// Format of the glow layer: float, so overlapping glows add up without clipping.
+const GLOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// Glow is drawn at 1/GLOW_DOWNSCALE of the screen resolution: it is blurred anyway.
+const GLOW_DOWNSCALE: u32 = 4;
 
 /// One link, in screen points.
 #[repr(C)]
@@ -29,7 +43,7 @@ pub struct EdgeInstance {
     pub width: f32,
 }
 
-/// One note, in screen points.
+/// One disc (note, halo or glow), in screen points.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct NodeInstance {
@@ -46,6 +60,24 @@ struct Uniforms {
     _pad: f32,
     background: [f32; 4],
     background_glow: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct BlurUniforms {
+    dir: [f32; 2],
+    _pad: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct CompositeUniforms {
+    glow: f32,
+    chroma: f32,
+    vignette: f32,
+    grain: f32,
+    size: [f32; 2],
+    glow_texel: [f32; 2],
 }
 
 /// The GPU device, shared by every window and off-screen target.
@@ -92,58 +124,94 @@ pub fn preferred_format(formats: &[wgpu::TextureFormat]) -> wgpu::TextureFormat 
         .unwrap_or(formats[0])
 }
 
-/// Pipelines and instance buffers for one target format.
-pub struct GraphRenderer {
-    bg: wgpu::RenderPipeline,
-    edges: wgpu::RenderPipeline,
-    nodes: wgpu::RenderPipeline,
-    uniforms: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
-    edge_buf: Option<wgpu::Buffer>,
-    node_buf: Option<wgpu::Buffer>,
-    edge_count: u32,
-    node_count: u32,
+fn uniform_layout(device: &wgpu::Device, entries: &[wgpu::BindGroupLayoutEntry]) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries })
 }
 
-impl GraphRenderer {
-    pub fn new(gpu: &Gpu, format: wgpu::TextureFormat) -> Self {
-        let device = &gpu.device;
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("graph"),
+fn buffer_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+        ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+        count: None,
+    }
+}
+
+fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    }
+}
+
+fn uniform_buffer<T: Pod>(device: &wgpu::Device, label: &str) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: std::mem::size_of::<T>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+struct Pipelines {
+    bg: wgpu::RenderPipeline,
+    halos: wgpu::RenderPipeline,
+    edges: wgpu::RenderPipeline,
+    nodes: wgpu::RenderPipeline,
+    glow: wgpu::RenderPipeline,
+    blur: wgpu::RenderPipeline,
+    composite: wgpu::RenderPipeline,
+    scene_layout: wgpu::BindGroupLayout,
+    blur_layout: wgpu::BindGroupLayout,
+    composite_layout: wgpu::BindGroupLayout,
+}
+
+impl Pipelines {
+    fn new(device: &wgpu::Device, out_format: wgpu::TextureFormat) -> Self {
+        let scene_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scene"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: None,
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
-                count: None,
-            }],
+        let post_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("post"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("post.wgsl").into()),
         });
-        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[Some(&layout)],
-            ..Default::default()
-        });
-        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("uniforms"),
-            size: std::mem::size_of::<Uniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() }],
-        });
-        let pipeline = |vs: &str, fs: &str, buffers: &[Option<wgpu::VertexBufferLayout>], blend: Option<wgpu::BlendState>| {
+        let scene_layout = uniform_layout(device, &[buffer_entry(0)]);
+        let blur_layout = uniform_layout(device, &[texture_entry(0), sampler_entry(1), buffer_entry(2)]);
+        let composite_layout = uniform_layout(device, &[texture_entry(0), texture_entry(1), sampler_entry(2), buffer_entry(3)]);
+        let make = |module: &wgpu::ShaderModule,
+                    layout: &wgpu::BindGroupLayout,
+                    vs: &str,
+                    fs: &str,
+                    buffers: &[Option<wgpu::VertexBufferLayout>],
+                    format: wgpu::TextureFormat,
+                    blend: Option<wgpu::BlendState>| {
+            let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[Some(layout)],
+                ..Default::default()
+            });
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(vs),
+                label: Some(fs),
                 layout: Some(&pl),
-                vertex: wgpu::VertexState { module: &module, entry_point: Some(vs), buffers, compilation_options: Default::default() },
+                vertex: wgpu::VertexState { module, entry_point: Some(vs), buffers, compilation_options: Default::default() },
                 fragment: Some(wgpu::FragmentState {
-                    module: &module,
+                    module,
                     entry_point: Some(fs),
                     targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
                     compilation_options: Default::default(),
@@ -165,85 +233,271 @@ impl GraphRenderer {
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32, 2 => Float32x4],
         };
-        GraphRenderer {
-            bg: pipeline("bg_vs", "bg_fs", &[], None),
-            edges: pipeline("edge_vs", "edge_fs", &[Some(edge_layout)], Some(wgpu::BlendState::ALPHA_BLENDING)),
-            nodes: pipeline("node_vs", "node_fs", &[Some(node_layout)], Some(wgpu::BlendState::ALPHA_BLENDING)),
-            uniforms,
-            bind_group,
+        let alpha = Some(wgpu::BlendState::ALPHA_BLENDING);
+        let additive = Some(wgpu::BlendState {
+            color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
+            alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
+        });
+        let node = Some(node_layout);
+        Pipelines {
+            bg: make(&scene_mod, &scene_layout, "bg_vs", "bg_fs", &[], SCENE_FORMAT, None),
+            halos: make(&scene_mod, &scene_layout, "node_vs", "halo_fs", std::slice::from_ref(&node), SCENE_FORMAT, alpha),
+            edges: make(&scene_mod, &scene_layout, "edge_vs", "edge_fs", &[Some(edge_layout)], SCENE_FORMAT, alpha),
+            nodes: make(&scene_mod, &scene_layout, "node_vs", "node_fs", std::slice::from_ref(&node), SCENE_FORMAT, alpha),
+            glow: make(&scene_mod, &scene_layout, "node_vs", "glow_fs", std::slice::from_ref(&node), GLOW_FORMAT, additive),
+            blur: make(&post_mod, &blur_layout, "full_vs", "blur_fs", &[], GLOW_FORMAT, None),
+            composite: make(&post_mod, &composite_layout, "full_vs", "composite_fs", &[], out_format, None),
+            scene_layout,
+            blur_layout,
+            composite_layout,
+        }
+    }
+}
+
+/// Cached textures for one target size.
+struct Targets {
+    size: [u32; 2],
+    scene: wgpu::Texture,
+    glow_a: wgpu::Texture,
+    glow_b: wgpu::Texture,
+    blur_h: wgpu::BindGroup,
+    blur_v: wgpu::BindGroup,
+    composite: wgpu::BindGroup,
+}
+
+fn instance_buffer<T: Pod>(gpu: &Gpu, slot: &mut Option<wgpu::Buffer>, data: &[T], label: &str) -> u32 {
+    let bytes: &[u8] = bytemuck::cast_slice(data);
+    if bytes.is_empty() {
+        return 0;
+    }
+    if slot.as_ref().is_none_or(|b| b.size() < bytes.len() as u64) {
+        *slot = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: (bytes.len() as u64).next_power_of_two(),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+    }
+    gpu.queue.write_buffer(slot.as_ref().unwrap(), 0, bytes);
+    data.len() as u32
+}
+
+/// Renders one screen: cached scene + glow, and the cheap per-frame composite.
+pub struct WallpaperRenderer {
+    pipelines: Pipelines,
+    text: TextRenderer,
+    sampler: wgpu::Sampler,
+    scene_uniforms: wgpu::Buffer,
+    scene_bind: wgpu::BindGroup,
+    glow_uniforms: wgpu::Buffer,
+    glow_bind: wgpu::BindGroup,
+    blur_h_uniforms: wgpu::Buffer,
+    blur_v_uniforms: wgpu::Buffer,
+    composite_uniforms: wgpu::Buffer,
+    targets: Option<Targets>,
+    halo_buf: Option<wgpu::Buffer>,
+    edge_buf: Option<wgpu::Buffer>,
+    node_buf: Option<wgpu::Buffer>,
+    glow_buf: Option<wgpu::Buffer>,
+    has_glow: bool,
+}
+
+impl WallpaperRenderer {
+    /// `out_format` is the format of the surface (or texture) `composite` draws into.
+    pub fn new(gpu: &Gpu, out_format: wgpu::TextureFormat) -> Self {
+        let device = &gpu.device;
+        let pipelines = Pipelines::new(device, out_format);
+        let scene_uniforms = uniform_buffer::<Uniforms>(device, "scene uniforms");
+        let glow_uniforms = uniform_buffer::<Uniforms>(device, "glow uniforms");
+        let bind = |buf: &wgpu::Buffer| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &pipelines.scene_layout,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() }],
+            })
+        };
+        let scene_bind = bind(&scene_uniforms);
+        let glow_bind = bind(&glow_uniforms);
+        WallpaperRenderer {
+            text: TextRenderer::new(gpu, SCENE_FORMAT),
+            sampler: device.create_sampler(&wgpu::SamplerDescriptor {
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                ..Default::default()
+            }),
+            scene_uniforms,
+            scene_bind,
+            glow_uniforms,
+            glow_bind,
+            blur_h_uniforms: uniform_buffer::<BlurUniforms>(device, "blur h"),
+            blur_v_uniforms: uniform_buffer::<BlurUniforms>(device, "blur v"),
+            composite_uniforms: uniform_buffer::<CompositeUniforms>(device, "composite"),
+            pipelines,
+            targets: None,
+            halo_buf: None,
             edge_buf: None,
             node_buf: None,
-            edge_count: 0,
-            node_count: 0,
+            glow_buf: None,
+            has_glow: false,
         }
     }
 
-    /// Uploads instances, growing the GPU buffers only when needed.
-    pub fn upload(&mut self, gpu: &Gpu, nodes: &[NodeInstance], edges: &[EdgeInstance]) {
-        fn put<T: Pod>(gpu: &Gpu, slot: &mut Option<wgpu::Buffer>, data: &[T], label: &str) {
-            let bytes: &[u8] = bytemuck::cast_slice(data);
-            if bytes.is_empty() {
-                return;
-            }
-            if slot.as_ref().is_none_or(|b| b.size() < bytes.len() as u64) {
-                *slot = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some(label),
-                    size: (bytes.len() as u64).next_power_of_two(),
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }));
-            }
-            gpu.queue.write_buffer(slot.as_ref().unwrap(), 0, bytes);
+    fn ensure_targets(&mut self, gpu: &Gpu, size: [u32; 2]) {
+        if self.targets.as_ref().is_some_and(|t| t.size == size) {
+            return;
         }
-        put(gpu, &mut self.edge_buf, edges, "edges");
-        put(gpu, &mut self.node_buf, nodes, "nodes");
-        self.edge_count = edges.len() as u32;
-        self.node_count = nodes.len() as u32;
+        let device = &gpu.device;
+        let tex = |label: &str, w: u32, h: u32, format: wgpu::TextureFormat| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: w.max(1), height: h.max(1), depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+        };
+        let (gw, gh) = (size[0].div_ceil(GLOW_DOWNSCALE), size[1].div_ceil(GLOW_DOWNSCALE));
+        let scene = tex("scene", size[0], size[1], SCENE_FORMAT);
+        let glow_a = tex("glow a", gw, gh, GLOW_FORMAT);
+        let glow_b = tex("glow b", gw, gh, GLOW_FORMAT);
+        let view = |t: &wgpu::Texture| t.create_view(&Default::default());
+        let blur_bind = |src: &wgpu::Texture, uniforms: &wgpu::Buffer| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &self.pipelines.blur_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view(src)) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    wgpu::BindGroupEntry { binding: 2, resource: uniforms.as_entire_binding() },
+                ],
+            })
+        };
+        let blur_h = blur_bind(&glow_a, &self.blur_h_uniforms);
+        let blur_v = blur_bind(&glow_b, &self.blur_v_uniforms);
+        let composite = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.pipelines.composite_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view(&scene)) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view(&glow_a)) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: self.composite_uniforms.as_entire_binding() },
+            ],
+        });
+        let texel = [1.0 / gw as f32, 1.0 / gh as f32];
+        gpu.queue.write_buffer(&self.blur_h_uniforms, 0, bytemuck::bytes_of(&BlurUniforms { dir: [texel[0], 0.0], _pad: [0.0; 2] }));
+        gpu.queue.write_buffer(&self.blur_v_uniforms, 0, bytemuck::bytes_of(&BlurUniforms { dir: [0.0, texel[1]], _pad: [0.0; 2] }));
+        self.targets = Some(Targets { size, scene, glow_a, glow_b, blur_h, blur_v, composite });
     }
 
-    /// Draws the uploaded scene into `view`. `size` is in pixels, `scale` is pixels
-    /// per point.
-    pub fn render(&self, gpu: &Gpu, view: &wgpu::TextureView, size: [u32; 2], scale: f32, style: &SceneStyle) {
-        let u = Uniforms {
-            size: [size[0] as f32 / scale, size[1] as f32 / scale],
+    /// Redraws the cached layers: call when the graph, positions, look, config or
+    /// target size changed. `size` is in pixels, `scale` pixels per point.
+    pub fn set_scene(&mut self, gpu: &Gpu, size: [u32; 2], scale: f32, data: &SceneData, style: &SceneStyle) {
+        self.ensure_targets(gpu, size);
+        let halos = instance_buffer(gpu, &mut self.halo_buf, &data.halos, "halos");
+        let edges = instance_buffer(gpu, &mut self.edge_buf, &data.edges, "edges");
+        let nodes = instance_buffer(gpu, &mut self.node_buf, &data.nodes, "nodes");
+        let glows = instance_buffer(gpu, &mut self.glow_buf, &data.glow, "glow");
+        self.has_glow = glows > 0 && style.glow > 0.0;
+        self.text.prepare(gpu, &data.text, size, scale);
+
+        let points = [size[0] as f32 / scale, size[1] as f32 / scale];
+        let mut u = Uniforms {
+            size: points,
             scale,
             _pad: 0.0,
             background: [style.background[0], style.background[1], style.background[2], 1.0],
             background_glow: style.background_glow,
         };
-        gpu.queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&u));
+        gpu.queue.write_buffer(&self.scene_uniforms, 0, bytemuck::bytes_of(&u));
+        u.scale = scale / GLOW_DOWNSCALE as f32;
+        gpu.queue.write_buffer(&self.glow_uniforms, 0, bytemuck::bytes_of(&u));
+
+        let t = self.targets.as_ref().unwrap();
+        let p = &self.pipelines;
         let mut enc = gpu.device.create_command_encoder(&Default::default());
         {
-            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("graph"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
-                })],
-                ..Default::default()
-            });
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.set_pipeline(&self.bg);
+            let view = t.scene.create_view(&Default::default());
+            let mut pass = begin(&mut enc, &view, "scene");
+            pass.set_bind_group(0, &self.scene_bind, &[]);
+            pass.set_pipeline(&p.bg);
             pass.draw(0..3, 0..1);
-            if let (Some(buf), true) = (&self.edge_buf, self.edge_count > 0) {
-                pass.set_pipeline(&self.edges);
-                pass.set_vertex_buffer(0, buf.slice(..));
-                pass.draw(0..6, 0..self.edge_count);
+            draw_instances(&mut pass, &p.halos, &self.halo_buf, halos);
+            draw_instances(&mut pass, &p.edges, &self.edge_buf, edges);
+            draw_instances(&mut pass, &p.nodes, &self.node_buf, nodes);
+            self.text.render(&mut pass);
+        }
+        if self.has_glow {
+            let glow_a = t.glow_a.create_view(&Default::default());
+            let glow_b = t.glow_b.create_view(&Default::default());
+            {
+                let mut pass = begin(&mut enc, &glow_a, "glow");
+                pass.set_bind_group(0, &self.glow_bind, &[]);
+                draw_instances(&mut pass, &p.glow, &self.glow_buf, glows);
             }
-            if let (Some(buf), true) = (&self.node_buf, self.node_count > 0) {
-                pass.set_pipeline(&self.nodes);
-                pass.set_vertex_buffer(0, buf.slice(..));
-                pass.draw(0..6, 0..self.node_count);
+            for (target, bind) in [(&glow_b, &t.blur_h), (&glow_a, &t.blur_v)] {
+                let mut pass = begin(&mut enc, target, "blur");
+                pass.set_pipeline(&p.blur);
+                pass.set_bind_group(0, bind, &[]);
+                pass.draw(0..3, 0..1);
             }
+        }
+        gpu.queue.submit([enc.finish()]);
+    }
+
+    /// Draws the cached layers onto `view`. `breath` scales the glow (1 = as
+    /// configured); this is all an animated frame costs.
+    pub fn composite(&self, gpu: &Gpu, view: &wgpu::TextureView, style: &SceneStyle, breath: f32) {
+        let Some(t) = &self.targets else { return };
+        let glow_px = [t.size[0].div_ceil(GLOW_DOWNSCALE) as f32, t.size[1].div_ceil(GLOW_DOWNSCALE) as f32];
+        let u = CompositeUniforms {
+            glow: if self.has_glow { style.glow * breath } else { 0.0 },
+            chroma: style.chromatic,
+            vignette: style.vignette,
+            grain: style.grain,
+            size: [t.size[0] as f32, t.size[1] as f32],
+            glow_texel: [1.0 / glow_px[0], 1.0 / glow_px[1]],
+        };
+        gpu.queue.write_buffer(&self.composite_uniforms, 0, bytemuck::bytes_of(&u));
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = begin(&mut enc, view, "composite");
+            pass.set_pipeline(&self.pipelines.composite);
+            pass.set_bind_group(0, &t.composite, &[]);
+            pass.draw(0..3, 0..1);
         }
         gpu.queue.submit([enc.finish()]);
     }
 }
 
+fn begin<'a>(enc: &'a mut wgpu::CommandEncoder, view: &'a wgpu::TextureView, label: &str) -> wgpu::RenderPass<'a> {
+    enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            resolve_target: None,
+            depth_slice: None,
+            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+        })],
+        ..Default::default()
+    })
+}
+
+fn draw_instances(pass: &mut wgpu::RenderPass<'_>, pipeline: &wgpu::RenderPipeline, buf: &Option<wgpu::Buffer>, count: u32) {
+    if let (Some(buf), true) = (buf, count > 0) {
+        pass.set_pipeline(pipeline);
+        pass.set_vertex_buffer(0, buf.slice(..));
+        pass.draw(0..6, 0..count);
+    }
+}
+
 /// Renders a scene off-screen and returns tightly packed RGBA8 pixels.
-pub fn render_rgba(gpu: &Gpu, size: [u32; 2], scale: f32, style: &SceneStyle, nodes: &[NodeInstance], edges: &[EdgeInstance]) -> Vec<u8> {
+pub fn render_rgba(gpu: &Gpu, size: [u32; 2], scale: f32, style: &SceneStyle, data: &SceneData, breath: f32) -> Vec<u8> {
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("offscreen"),
@@ -255,10 +509,13 @@ pub fn render_rgba(gpu: &Gpu, size: [u32; 2], scale: f32, style: &SceneStyle, no
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
-    let mut r = GraphRenderer::new(gpu, format);
-    r.upload(gpu, nodes, edges);
-    r.render(gpu, &texture.create_view(&Default::default()), size, scale, style);
+    let mut r = WallpaperRenderer::new(gpu, format);
+    r.set_scene(gpu, size, scale, data, style);
+    r.composite(gpu, &texture.create_view(&Default::default()), style, breath);
+    read_texture(gpu, &texture, size)
+}
 
+fn read_texture(gpu: &Gpu, texture: &wgpu::Texture, size: [u32; 2]) -> Vec<u8> {
     let row = size[0] * 4;
     let padded = row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
