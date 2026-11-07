@@ -1,0 +1,43 @@
+(async () => {
+  const L = m => window.ipc.postMessage(m);
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const disk = async () => (await fetch('vw://app/api/config')).json();
+  const st = () => document.getElementById('status').textContent;
+  L('secure=' + window.isSecureContext + ' clipboard=' + typeof navigator.clipboard + ' readText=' + typeof (navigator.clipboard && navigator.clipboard.readText));
+  try { localStorage.setItem('x','1'); L('localStorage ok ' + localStorage.getItem('x')); } catch (e) { L('localStorage fail ' + e.message); }
+  L('active=' + (document.activeElement && document.activeElement.tagName));
+  const set = async (id, v, ev='change') => { const el = document.getElementById(id); if (el.type==='checkbox') el.checked = v; else el.value = v; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event(ev, {bubbles:true})); await sleep(300); };
+  await set('f-zoom', 1.7); L('range zoom -> ' + (await disk()).zoom + ' status=' + st());
+  await set('f-accent', '#ff8800'); L('color accent -> ' + (await disk()).accent);
+  await set('f-particles', false); L('toggle particles -> ' + (await disk()).particles);
+  await set('f-layout', 'rings'); L('select layout -> ' + (await disk()).layout);
+  await set('f-motionMode', 'still'); L('select motion -> ' + (await disk()).motionMode);
+  await set('f-hubLabelCount', '12'); L('int hubLabelCount -> ' + (await disk()).hubLabelCount);
+  await set('f-hubLabelCount', '9999'); L('int clamp -> ' + (await disk()).hubLabelCount + ' field=' + document.getElementById('f-hubLabelCount').value);
+  await set('f-focusNote', '  today  '); L('text focusNote -> ' + JSON.stringify((await disk()).focusNote));
+  await set('f-labelStyle-glowColor', 'accent'); L('glowColor -> ' + JSON.stringify((await disk()).labelStyle));
+  await set('f-labelStyle-glowColor-hex', '#00ff00'); L('glowColor hex -> ' + JSON.stringify((await disk()).labelStyle));
+  await set('f-labelStyle-backgroundAlpha', 0.3); L('nested range -> ' + JSON.stringify((await disk()).labelStyle));
+  await set('safe-top', '45'); L('safe-top -> ' + JSON.stringify((await disk()).safeArea));
+  document.querySelector('[data-safe="30,0,90,0"]').click(); await sleep(300); L('safe preset -> ' + JSON.stringify((await disk()).safeArea));
+  await set('ignorePaths', 'templates\n  archive/old \n\n'); L('ignorePaths -> ' + JSON.stringify((await disk()).ignorePaths));
+  document.querySelector('.theme-tile[data-theme="night-sky"]').click(); await sleep(300); L('theme -> ' + (await disk()).theme);
+  const rc = document.querySelector('#rotateThemes input[value="ink-paper"]'); rc.checked = true; rc.dispatchEvent(new Event('change', {bubbles:true})); await sleep(300);
+  L('rotate -> ' + JSON.stringify((await disk()).rotate) + ' everyMinutes row off=' + document.getElementById('f-rotate-everyMinutes-row').classList.contains('off'));
+  await set('f-rotate-everyMinutes', '15'); L('rotate minutes -> ' + JSON.stringify((await disk()).rotate));
+  const tc = document.querySelector('#tagList .tag-color[data-tag="journal"]'); tc.value = '#123abc'; tc.dispatchEvent(new Event('change', {bubbles:true})); await sleep(300);
+  L('tagColors -> ' + JSON.stringify((await disk()).tagColors));
+  document.querySelector('#tagList .tag-remove[data-tag="journal"]').click(); await sleep(300); L('tag removed -> ' + JSON.stringify((await disk()).tagColors));
+  const neon = Array.from(document.querySelectorAll('#presets .preset')).find(b => b.textContent.includes('Neon')); neon.click(); await sleep(400);
+  const d = await disk(); L('preset neon -> accent=' + d.accent + ' bg=' + d.background + ' active=' + neon.classList.contains('active'));
+  document.getElementById('customName').value = 'Mine'; document.getElementById('saveCustomForm').requestSubmit(); await sleep(400);
+  L('custom saved -> ' + JSON.stringify((await (await fetch('vw://app/api/custom-presets')).json()).map(p => p.name)) + ' status=' + st());
+  const del = document.querySelector('.preset-del[data-del="Mine"]'); L('del button=' + !!del); if (del) { del.click(); await sleep(400); }
+  L('custom after delete -> ' + JSON.stringify((await (await fetch('vw://app/api/custom-presets')).json()).map(p => p.name)));
+  const r = await fetch('vw://app/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({accent:'red'})}); L('invalid -> ' + r.status + ' ' + (await r.json()).error);
+  document.getElementById('copyConfig').click(); await sleep(300); L('copy status=' + st());
+  document.getElementById('pasteConfig').click(); await sleep(300); L('paste panel hidden=' + document.getElementById('pastePanel').hidden + ' status=' + st());
+  document.getElementById('pasteText').value = '{"accent":"#abcdef"}'; document.getElementById('pasteApply').click(); await sleep(400); L('paste apply -> ' + (await disk()).accent);
+  document.getElementById('resetDefaults').click(); document.getElementById('resetYes').click(); await sleep(500); const dd = await disk(); L('reset -> accent=' + dd.accent + ' theme=' + dd.theme + ' motion=' + dd.motionMode);
+  L('DONE');
+})().catch(e => window.ipc.postMessage('SCRIPT ERROR ' + e.message + ' ' + e.stack));

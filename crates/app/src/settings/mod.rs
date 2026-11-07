@@ -45,13 +45,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use objc2::{MainThreadMarker, MainThreadOnly, sel};
-use objc2_app_kit::{NSApplication, NSMenu, NSMenuItem};
+use objc2_app_kit::{NSApplication, NSAutoresizingMaskOptions, NSMenu, NSMenuItem};
 use objc2_foundation::NSString;
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowId};
-use wry::{WebView, WebViewBuilder};
+use wry::{WebView, WebViewBuilder, WebViewExtMacOS};
 
 use api::Backend;
 
@@ -102,7 +102,12 @@ impl SettingsWindow {
 
         let backend = Arc::new(Mutex::new(Backend::new(config_path)));
         let handler = Arc::clone(&backend);
+        let size = window.inner_size();
         let webview = WebViewBuilder::new()
+            .with_bounds(wry::Rect {
+                position: PhysicalPosition::new(0, 0).into(),
+                size: size.into(),
+            })
             .with_custom_protocol(SCHEME.into(), move |_id, req| match handler.lock() {
                 Ok(b) => b.handle(&req),
                 Err(poisoned) => poisoned.into_inner().handle(&req),
@@ -110,11 +115,26 @@ impl SettingsWindow {
             // Matches the page's dark background, so opening doesn't flash white.
             .with_background_color((14, 14, 20, 255))
             .with_url(START_URL)
+            // `window.ipc.postMessage(text)` from the page goes to stderr: page errors
+            // and the example's scripted checks report through it.
+            .with_ipc_handler(|req| eprintln!("[settings page] {}", req.body()))
             // Stay on our page; there is nothing on the web to navigate to.
             .with_navigation_handler(|url| url.starts_with("vw://"))
             .with_new_window_req_handler(|_url, _features| wry::NewWindowResponse::Deny)
-            .build(&window)
+            // As a child of winit's content view, not `build`: `build` swaps the window's
+            // content view for wry's own, and winit's window delegate casts the content
+            // view back to its view type on every focus change. Clicking another window
+            // then aborted the process ("tried to access uninitialized instance variable"
+            // in `windowDidResignKey:`).
+            .build_as_child(&window)
             .map_err(SettingsError::WebView)?;
+        // Fill the window and follow its size without per-event work.
+        webview.webview().setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        // Keyboard focus in the page from the start (Tab, typing), not in winit's view.
+        let _ = webview.focus();
 
         if let Some(mtm) = MainThreadMarker::new() {
             install_edit_menu(mtm);
@@ -143,6 +163,7 @@ impl SettingsWindow {
     pub fn focus(&self) {
         self.window.set_minimized(false);
         self.window.focus_window();
+        let _ = self.webview.focus();
     }
 
     /// Tells the page the config file changed (a hand edit, a theme rotation, or its own
