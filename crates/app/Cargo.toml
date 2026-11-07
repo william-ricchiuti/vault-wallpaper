@@ -11,8 +11,10 @@ objc2-quartz-core = { version = "0.3", features = ["CALayer", "CAMetalLayer", "C
 objc2-service-management = "0.3"
 raw-window-handle = "0.6.2"
 rfd = "0.17.2"
+serde_json = "1.0.154"
 tray-icon = "0.26.1"
 vw-core = { version = "0.1.0", path = "../core" }
 vw-render = { version = "0.1.0", path = "../render" }
 wgpu = "30.0.1"
 winit = "0.30.13"
+wry = { version = "0.57.1", default-features = false }

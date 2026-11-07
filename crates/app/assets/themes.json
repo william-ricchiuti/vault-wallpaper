@@ -1,0 +1,104 @@
+[
+  {
+    "id": "default",
+    "name": "Default",
+    "description": "The classic glowing graph. Presets tune it.",
+    "dark": true
+  },
+  {
+    "id": "aurora",
+    "name": "Aurora",
+    "description": "Each tag cluster casts a slow curtain of coloured light; additive blending makes hubs glow brighter, not muddier.",
+    "dark": true
+  },
+  {
+    "id": "bauhaus",
+    "name": "Bauhaus",
+    "description": "A poster in primaries: tags become shapes as well as colours, and the biggest hubs anchor large compositional forms.",
+    "dark": false
+  },
+  {
+    "id": "celestial",
+    "name": "Celestial",
+    "description": "A star chart: notes become stars with diffraction spikes and orbital rings, slowly rotating around the pole.",
+    "dark": true
+  },
+  {
+    "id": "led",
+    "name": "LED Board",
+    "description": "The graph resampled onto a grid of physical LEDs, unlit diodes faintly visible, with a ticker of vault stats.",
+    "dark": true
+  },
+  {
+    "id": "metro",
+    "name": "Metro",
+    "description": "A transit diagram: positions snap to a grid, links route at 45° and 90°, each tag's link tree becomes a coloured line.",
+    "dark": false
+  },
+  {
+    "id": "mycelium",
+    "name": "Mycelium",
+    "description": "Links grow as wandering hyphae and notes as spore clusters; amber pulses travel out from notes you just edited.",
+    "dark": true
+  },
+  {
+    "id": "phosphor",
+    "name": "Phosphor",
+    "description": "A green phosphor terminal: tags become glyphs, links are dotted, with scanlines, a slow roll bar and a live watch line.",
+    "dark": true
+  },
+  {
+    "id": "pixel",
+    "name": "Pocket Pixel",
+    "description": "Drawn at quarter resolution, quantised to a 4-shade handheld palette with ordered Bayer dithering, scaled up with hard pixels.",
+    "dark": true
+  },
+  {
+    "id": "riso",
+    "name": "Risograph",
+    "description": "A riso print: each tag gets a real riso ink on its own slightly misregistered plate, hubs are halftone-screened.",
+    "dark": false
+  },
+  {
+    "id": "sketch",
+    "name": "Sketchbook",
+    "description": "Pencil on ruled paper: wobbly hand-drawn links and circled notes.",
+    "dark": false
+  },
+  {
+    "id": "stained-glass",
+    "name": "Stained Glass",
+    "description": "Every note is a pane of coloured glass (a Voronoi cell) set in dark lead, lit from behind.",
+    "dark": true
+  },
+  {
+    "id": "stitch",
+    "name": "Cross-stitch",
+    "description": "Embroidered on Aida cloth: notes become blocks of X stitches, links are backstitched in dark thread.",
+    "dark": false
+  },
+  {
+    "id": "survey",
+    "name": "Survey",
+    "description": "A topographic survey sheet: link density becomes contour lines, hubs are summits, the link tree becomes footpaths.",
+    "dark": false
+  },
+  {
+    "id": "synapse",
+    "name": "Synapse",
+    "description": "Shows activity: recently edited notes fire every few seconds and the pulse travels outward hop by hop through your links.",
+    "dark": true
+  },
+  {
+    "id": "territories",
+    "name": "Territories",
+    "description": "An atlas page: each note claims a Voronoi cell, tags become countries with dashed borders, hubs become capitals.",
+    "dark": false
+  },
+  {
+    "id": "wash",
+    "name": "Ink Wash",
+    "description": "Watercolour on paper: pigment bleeds around each note and links are soft brush strokes.",
+    "dark": false
+  }
+]
