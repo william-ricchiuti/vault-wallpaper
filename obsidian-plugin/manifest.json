@@ -1,0 +1,9 @@
+{
+  "id": "vault-wallpaper",
+  "name": "Vault Wallpaper",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "Tells the Vault Wallpaper desktop app which note you have open, through a small file in the vault. No network, no port.",
+  "author": "William Ricchiuti",
+  "isDesktopOnly": true
+}
