@@ -223,3 +223,42 @@ struct InkOut {
   let alpha = cover * pool + (1.0 - cover) * bleed;
   return vec4<f32>(in.color.rgb, clamp(in.color.a * alpha, 0.0, 1.0));
 }
+
+// ---- ink links: a pen stroke, thin at the ends and swelling to full width a little
+// off-centre (the swell point varies per link) ----
+struct InkEdgeOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) across: f32,
+  @location(1) half: f32,
+  @location(2) color: vec4<f32>,
+  @location(3) along: f32,
+  @location(4) @interpolate(flat) peak: f32,
+};
+
+@vertex fn ink_edge_vs(@builtin(vertex_index) v: u32, e: Edge) -> InkEdgeOut {
+  let corners = array<vec2<f32>, 6>(vec2(0., -1.), vec2(1., -1.), vec2(0., 1.), vec2(0., 1.), vec2(1., -1.), vec2(1., 1.));
+  let c = corners[v];
+  var dir = e.b - e.a;
+  let len = length(dir);
+  dir = select(vec2<f32>(1.0, 0.0), dir / len, len > 1e-4);
+  let n = vec2<f32>(-dir.y, dir.x);
+  let half = e.width * 0.5;
+  let reach = half + 1.0 / u.scale;
+  var o: InkEdgeOut;
+  o.pos = to_clip(mix(e.a, e.b, c.x) + n * c.y * reach);
+  o.across = c.y * reach;
+  o.half = half;
+  o.color = e.color;
+  o.along = c.x;
+  o.peak = 0.38 + 0.24 * hash2(e.a * 0.37 + e.b * 0.61);
+  return o;
+}
+
+@fragment fn ink_edge_fs(in: InkEdgeOut) -> @location(0) vec4<f32> {
+  let span = select(1.0 - in.peak, in.peak, in.along < in.peak);
+  let k = (in.along - in.peak) / span;
+  let half = in.half * (0.35 + 0.65 * (1.0 - k * k));
+  let cover = clamp((half - abs(in.across)) * u.scale + 0.5, 0.0, 1.0);
+  let thin = min(1.0, half * 2.0 * u.scale);
+  return vec4<f32>(in.color.rgb, in.color.a * cover * thin);
+}

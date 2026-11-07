@@ -3,6 +3,8 @@
 //! hubs are bolder. Tags tint the ink with at most three muted inks. No glow and no
 //! motion: everything is drawn once into the cached scene.
 
+use std::collections::HashMap;
+
 use vw_core::config::Config;
 use vw_core::layout::LayoutGraph;
 
@@ -22,13 +24,28 @@ fn hash(bytes: impl IntoIterator<Item = u8>) -> u32 {
     bytes.into_iter().fold(2_166_136_261u32, |h, b| (h ^ u32::from(b)).wrapping_mul(16_777_619))
 }
 
-/// The ink for a tag. Most of the plate stays black; the coloured inks are accents.
-fn ink(tag: Option<&str>) -> [f32; 3] {
-    let Some(tag) = tag else { return INKS[0] };
-    match hash(tag.bytes()) % 5 {
-        1 => INKS[1],
-        2 => INKS[2],
-        _ => INKS[0],
+/// Inks by tag. The plate stays mostly black: only a few of the biggest tags print
+/// in a colour ink, and never the very biggest, which carries the black.
+struct Inks<'a> {
+    coloured: HashMap<&'a str, [f32; 3]>,
+}
+
+impl<'a> Inks<'a> {
+    /// Tags ranked 2nd to 5th by note count (with at least 3 notes) get indigo and
+    /// oxblood in turn.
+    fn new(tags: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut count: HashMap<&str, usize> = HashMap::new();
+        for t in tags {
+            *count.entry(t).or_default() += 1;
+        }
+        let mut ranked: Vec<(&str, usize)> = count.into_iter().filter(|&(_, c)| c >= 3).collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        let coloured = ranked.iter().skip(1).take(4).enumerate().map(|(k, &(t, _))| (t, INKS[1 + k % 2])).collect();
+        Inks { coloured }
+    }
+
+    fn get(&self, tag: Option<&str>) -> [f32; 3] {
+        tag.and_then(|t| self.coloured.get(t).copied()).unwrap_or(INKS[0])
     }
 }
 
@@ -76,6 +93,7 @@ pub(super) fn build(
     let imp = |i: usize| look.node_importance.get(i).copied().unwrap_or(0.0);
     let visible = |i: usize| look.node_color.get(i).is_none_or(|c| c[3] > 0.0);
     let tag = |i: usize| graph.tag[i].as_deref();
+    let inks = Inks::new((0..n).filter(|&i| !graph.ghost[i]).filter_map(tag));
     let mut data = SceneData::default();
 
     // Dense vaults print with a lighter hand, or the core turns into a blot.
@@ -90,15 +108,18 @@ pub(super) fn build(
         if look.edge_color.get(k).is_some_and(|c| c[3] <= 0.0) {
             continue;
         }
-        let i = imp(s).max(imp(t));
+        // Weight follows the weaker end: spokes from a hub out to single notes stay
+        // fine, so hubs don't print as dark sunbursts; links between two
+        // well-connected notes are the bold strokes.
+        let (lo, hi) = (imp(s).min(imp(t)).sqrt(), imp(s).max(imp(t)).sqrt());
         let j = jitter(s, t);
         // Same tag: that tag's ink. Across tags: black.
-        let [r, g, b] = if tag(s).is_some() && tag(s) == tag(t) { ink(tag(s)) } else { INKS[0] };
-        data.edges.push(EdgeInstance {
+        let [r, g, b] = if tag(s).is_some() && tag(s) == tag(t) { inks.get(tag(s)) } else { INKS[0] };
+        data.ink_edges.push(EdgeInstance {
             a: screen[s],
             b: screen[t],
-            color: [r, g, b, (0.16 + i.sqrt() * 0.34) * density * (0.75 + j * 0.5)],
-            width: (0.4 + i.sqrt() * 0.9) * (0.7 + j * 0.6),
+            color: [r, g, b, (0.15 + lo * 0.55 + hi * 0.08) * density * (0.75 + j * 0.5)],
+            width: (0.5 + lo * 1.4 + hi * 0.3) * (0.7 + j * 0.6),
         });
     }
 
@@ -107,7 +128,7 @@ pub(super) fn build(
     order.sort_by(|&a, &b| imp(a).total_cmp(&imp(b)));
     for i in order {
         let p = imp(i);
-        let [r, g, b] = ink(tag(i));
+        let [r, g, b] = inks.get(tag(i));
         if graph.ghost[i] {
             // Unresolved links: a faint pinprick, no bleed.
             data.nodes.push(NodeInstance { center: screen[i], radius: 0.8, color: [r, g, b, 0.35] });
@@ -151,10 +172,19 @@ mod tests {
     }
 
     #[test]
-    fn inks_are_few_and_untagged_is_black() {
-        assert_eq!(ink(None), INKS[0]);
-        let used: std::collections::HashSet<[u32; 3]> =
-            (0..200).map(|i| ink(Some(&format!("tag{i}"))).map(f32::to_bits)).collect();
-        assert!(used.len() <= INKS.len());
+    fn colour_inks_go_to_a_few_big_tags() {
+        let mut tags = Vec::new();
+        for (k, name) in ["a", "b", "c", "d", "e", "f", "g"].iter().enumerate() {
+            tags.extend(std::iter::repeat_n(*name, 20 - k));
+        }
+        tags.push("tiny");
+        let inks = Inks::new(tags);
+        assert_eq!(inks.get(None), INKS[0]);
+        assert_eq!(inks.get(Some("a")), INKS[0], "the biggest tag stays black");
+        assert_eq!(inks.get(Some("b")), INKS[1]);
+        assert_eq!(inks.get(Some("c")), INKS[2]);
+        assert_eq!(inks.get(Some("e")), INKS[2]);
+        assert_eq!(inks.get(Some("f")), INKS[0]);
+        assert_eq!(inks.get(Some("tiny")), INKS[0]);
     }
 }

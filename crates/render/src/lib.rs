@@ -177,6 +177,7 @@ struct Pipelines {
     nodes: wgpu::RenderPipeline,
     stars: wgpu::RenderPipeline,
     inks: wgpu::RenderPipeline,
+    ink_edges: wgpu::RenderPipeline,
     glow: wgpu::RenderPipeline,
     blur: wgpu::RenderPipeline,
     composite: wgpu::RenderPipeline,
@@ -244,13 +245,15 @@ impl Pipelines {
             alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
         });
         let node = Some(node_layout);
+        let edge = Some(edge_layout);
         Pipelines {
             bg: make(&scene_mod, &scene_layout, "bg_vs", "bg_fs", &[], SCENE_FORMAT, None),
             halos: make(&scene_mod, &scene_layout, "node_vs", "halo_fs", std::slice::from_ref(&node), SCENE_FORMAT, alpha),
-            edges: make(&scene_mod, &scene_layout, "edge_vs", "edge_fs", &[Some(edge_layout)], SCENE_FORMAT, alpha),
+            edges: make(&scene_mod, &scene_layout, "edge_vs", "edge_fs", std::slice::from_ref(&edge), SCENE_FORMAT, alpha),
             nodes: make(&scene_mod, &scene_layout, "node_vs", "node_fs", std::slice::from_ref(&node), SCENE_FORMAT, alpha),
             stars: make(&scene_mod, &scene_layout, "node_vs", "star_fs", std::slice::from_ref(&node), SCENE_FORMAT, alpha),
             inks: make(&scene_mod, &scene_layout, "ink_vs", "ink_fs", std::slice::from_ref(&node), SCENE_FORMAT, alpha),
+            ink_edges: make(&scene_mod, &scene_layout, "ink_edge_vs", "ink_edge_fs", std::slice::from_ref(&edge), SCENE_FORMAT, alpha),
             glow: make(&scene_mod, &scene_layout, "node_vs", "glow_fs", std::slice::from_ref(&node), GLOW_FORMAT, additive),
             blur: make(&post_mod, &blur_layout, "full_vs", "blur_fs", &[], GLOW_FORMAT, None),
             composite: make(&post_mod, &composite_layout, "full_vs", "composite_fs", &[], out_format, None),
@@ -308,6 +311,7 @@ pub struct WallpaperRenderer {
     node_buf: Option<wgpu::Buffer>,
     star_buf: Option<wgpu::Buffer>,
     ink_buf: Option<wgpu::Buffer>,
+    ink_edge_buf: Option<wgpu::Buffer>,
     glow_buf: Option<wgpu::Buffer>,
     has_glow: bool,
 }
@@ -351,6 +355,7 @@ impl WallpaperRenderer {
             node_buf: None,
             star_buf: None,
             ink_buf: None,
+            ink_edge_buf: None,
             glow_buf: None,
             has_glow: false,
         }
@@ -416,6 +421,7 @@ impl WallpaperRenderer {
         let nodes = instance_buffer(gpu, &mut self.node_buf, &data.nodes, "nodes");
         let stars = instance_buffer(gpu, &mut self.star_buf, &data.stars, "stars");
         let inks = instance_buffer(gpu, &mut self.ink_buf, &data.inks, "inks");
+        let ink_edges = instance_buffer(gpu, &mut self.ink_edge_buf, &data.ink_edges, "ink edges");
         let glows = instance_buffer(gpu, &mut self.glow_buf, &data.glow, "glow");
         self.has_glow = glows > 0 && style.glow > 0.0;
         self.text.prepare(gpu, &data.text, size, scale);
@@ -443,6 +449,7 @@ impl WallpaperRenderer {
             pass.draw(0..3, 0..1);
             draw_instances(&mut pass, &p.halos, &self.halo_buf, halos);
             draw_instances(&mut pass, &p.edges, &self.edge_buf, edges);
+            draw_instances(&mut pass, &p.ink_edges, &self.ink_edge_buf, ink_edges);
             draw_instances(&mut pass, &p.nodes, &self.node_buf, nodes);
             draw_instances(&mut pass, &p.stars, &self.star_buf, stars);
             draw_instances(&mut pass, &p.inks, &self.ink_buf, inks);
