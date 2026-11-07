@@ -46,7 +46,7 @@ fn main() {
     settle(&mut sim, 600);
     let positions: Vec<[f32; 2]> = sim.x.iter().zip(&sim.y).map(|(&x, &y)| [x as f32, y as f32]).collect();
     let points = [w as f32 / scale, h as f32 / scale];
-    let framing = Framing::fit(&positions, points[0], points[1], &FramingOptions::from_config(&cfg));
+    let framing = Framing::fit_graph(&positions, &lg.degree, points[0], points[1], &FramingOptions::from_config(&cfg));
     let theme = Theme::from_config(&cfg);
     let style = theme.style(&cfg, false);
     let look = derive_look(&graph, &lg, &cfg, &LookContext { now_ms: 1.8e12, light: false });

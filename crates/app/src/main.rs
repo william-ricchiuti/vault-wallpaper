@@ -390,7 +390,7 @@ impl App {
             let points = [size[0] as f32 / scale, size[1] as f32 / scale];
             let data = match &self.shown {
                 Some(sh) => {
-                    let framing = Framing::fit(&sh.positions, points[0], points[1], &self.framing);
+                    let framing = Framing::fit_graph(&sh.positions, &sh.layout.degree, points[0], points[1], &self.framing);
                     self.theme.build(&sh.layout, &sh.look, &sh.positions, &framing, &self.style, points)
                 }
                 None => Default::default(),
@@ -473,7 +473,7 @@ impl App {
         let scale = screen.window.scale_factor() as f32;
         let size = [screen.config.width, screen.config.height];
         let points = [size[0] as f32 / scale, size[1] as f32 / scale];
-        let framing = Framing::fit(&sh.positions, points[0], points[1], &self.framing);
+        let framing = Framing::fit_graph(&sh.positions, &sh.layout.degree, points[0], points[1], &self.framing);
         let data = self.theme.build(&sh.layout, &sh.look, &sh.positions, &framing, &self.style, points);
         let rgba = render_rgba(gpu, size, scale, &self.style, &data, 1.0);
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
