@@ -14,6 +14,7 @@
 //! ends the layer hides. A settled, still wallpaper draws nothing at all.
 
 mod desktop;
+mod import;
 mod menu;
 mod overlay;
 mod settings;
@@ -614,6 +615,14 @@ impl App {
                     if let Err(e) = config::save(&self.args.config, &cfg) {
                         eprintln!("could not save the config: {e}");
                     }
+                }
+            }
+            Action::ImportWebConfig => {
+                // A menu-bar app isn't frontmost: bring the dialogs forward.
+                desktop::activate();
+                // On success the config watcher picks the new file up, restyles and rescans.
+                if import::run(&self.args.config, &self.cfg) {
+                    self.args.vault = None;
                 }
             }
             Action::OpenSettings => {
