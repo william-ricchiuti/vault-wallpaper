@@ -15,9 +15,14 @@
 //! removed. A settled, still wallpaper draws nothing at all.
 
 mod desktop;
+mod displays;
+mod import;
 mod menu;
 mod overlay;
+mod power;
+mod presence;
 mod settings;
+mod system;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,16 +33,20 @@ use objc2_app_kit::NSWindow;
 use vw_core::config::{self, Config, ConfigWatcher};
 use vw_core::layout::{LayoutEngine, LayoutFrame, LayoutGraph};
 use vw_core::vault::{Graph, Vault, VaultWatcher, watch};
+use displays::Geom;
 use menu::{Action, AppMenu};
+use power::PowerState;
+use system::SysEvent;
 use overlay::{BurstOverlay, GlowOverlay};
+use presence::Presence;
 use settings::SettingsWindow;
 use tray_icon::menu::MenuEvent;
 use vw_render::{
-    Ambient, EditBurst, Framing, FramingOptions, Gpu, Look, LookContext, SceneStyle, Theme, WallpaperRenderer, derive_look, preferred_format,
+    Ambient, EditBurst, FramingOptions, Gpu, Look, LookContext, SceneStyle, Theme, WallpaperRenderer, derive_look, preferred_format,
     render_rgba, write_png,
 };
 use winit::application::ApplicationHandler;
-use winit::dpi::{PhysicalPosition, PhysicalSize};
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalSize};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS, WindowAttributesExtMacOS};
@@ -51,11 +60,18 @@ const LAYOUT_FPS: f64 = 12.0;
 /// checkout), not someone saving a note: it redraws, but doesn't animate.
 const MAX_BURSTS: usize = 16;
 
+/// While the user is away, how often visibility is re-checked in case the
+/// notification that they're back was missed.
+const AWAY_CHECK: Duration = Duration::from_secs(60);
+
 enum AppEvent {
     Graph(Box<Graph>),
     Layout(Box<LayoutFrame>),
     Config(Box<Config>),
     Menu(MenuEvent),
+    System(SysEvent),
+    /// The Obsidian plugin's state file changed (`None`: gone or unreadable).
+    Presence(Option<Box<vw_core::presence::PresenceState>>),
 }
 
 struct Args {
@@ -108,6 +124,8 @@ fn load_config(path: &std::path::Path) -> Config {
 
 /// One wallpaper window (one per display).
 struct Screen {
+    /// The display this window covers.
+    geom: Geom,
     window: Arc<Window>,
     ns_window: Option<Retained<NSWindow>>,
     surface: wgpu::Surface<'static>,
@@ -129,8 +147,39 @@ struct Screen {
 
 impl Screen {
     fn check_visible(&mut self) -> bool {
-        self.visible = self.ns_window.as_deref().is_none_or(desktop::is_visible);
-        self.visible
+        let visible = self.ns_window.as_deref().is_none_or(desktop::is_visible);
+        if visible != self.visible {
+            eprintln!("display {} visible={visible}", self.geom.id);
+        }
+        self.visible = visible;
+        visible
+    }
+
+    /// Matches the surface and overlays to a new window size (pixels).
+    fn resize(&mut self, gpu: &Gpu, size: PhysicalSize<u32>) {
+        let (w, h) = (size.width.max(1), size.height.max(1));
+        if (w, h) != (self.config.width, self.config.height) {
+            self.config.width = w;
+            self.config.height = h;
+            self.surface.configure(&gpu.device, &self.config);
+        }
+        if let (Some(o), Some(win)) = (&self.overlay, &self.ns_window) {
+            o.fit(win);
+        }
+        if let (Some(o), Some(win)) = (&self.burst_overlay, &self.ns_window) {
+            o.fit(win);
+        }
+        // Running bursts are baked again for the new size with the next scene.
+        self.bursts_dirty |= self.burst_overlay.is_some();
+        self.scene_dirty = true;
+        self.frame_dirty = true;
+    }
+
+    /// The screen's rectangle in points, for framing: its place on the desktop and
+    /// its drawable size.
+    fn rect(&self) -> [f32; 4] {
+        let scale = self.window.scale_factor() as f32;
+        [self.geom.x as f32, self.geom.y as f32, self.config.width as f32 / scale, self.config.height as f32 / scale]
     }
 }
 
@@ -160,9 +209,17 @@ struct App {
     _vault_watcher: Option<VaultWatcher>,
     _config_watcher: Option<ConfigWatcher>,
     started: Instant,
-    /// When Low Power Mode was last checked while breathing.
-    power_checked: Instant,
-    low_power: bool,
+    /// Low Power Mode and the power source, kept current by notifications.
+    power: PowerState,
+    /// The user can't see the screens (asleep, locked, switched out): draw nothing.
+    away: bool,
+    /// Span mode: one picture across every display (`VW_SPAN=1`).
+    span: bool,
+    /// The union of every display, in points, while spanning.
+    span_rect: Option<[f32; 4]>,
+    _system: Option<system::Observers>,
+    /// While away, when to look at visibility again in case a wake was missed.
+    away_check: Instant,
     menu: Option<AppMenu>,
     /// Open only while the user has it open; closing drops the web view.
     settings: Option<SettingsWindow>,
@@ -177,6 +234,8 @@ struct App {
     bursts: Vec<(String, Instant)>,
     /// Atlas bytes baked since the bursts last settled (for the log).
     burst_bytes: usize,
+    /// What the Obsidian plugin says is open; inert without the plugin.
+    presence: Presence,
 }
 
 impl App {
@@ -211,6 +270,7 @@ impl App {
     /// (Re)scans the vault and starts watching it.
     fn open_vault(&mut self) {
         self._vault_watcher = None;
+        self.presence = Presence::default();
         let Some(path) = self.vault_path() else {
             eprintln!("no vault set: pass --vault or set vaultPath in {}", self.args.config.display());
             return;
@@ -227,12 +287,18 @@ impl App {
             Err(e) => eprintln!("not watching the vault: {e}"),
         }
         self.send_graph(graph);
+        let proxy = self.proxy.clone();
+        self.presence = Presence::start(&path, move |s| {
+            let _ = proxy.send_event(AppEvent::Presence(s.map(Box::new)));
+        });
     }
 
     /// A graph from the vault watcher: an edit. Notes it saved are remembered, and
     /// their bursts start once the layout frame that shows this graph arrives.
     fn on_graph(&mut self, graph: Graph) {
+        // While the Obsidian plugin is live, its save reports start the bursts instead.
         if self.edit_burst.is_some()
+            && !self.presence.live(vw_core::presence::now_ms())
             && let Some((old, _)) = self.sent.last()
         {
             let edited = graph.edited_since(old);
@@ -255,7 +321,9 @@ impl App {
 
     fn look_for(&self, graph: &Graph, layout: &LayoutGraph) -> Look {
         let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64() * 1000.0);
-        derive_look(graph, layout, &self.cfg, &LookContext { now_ms, light: false })
+        let mut look = derive_look(graph, layout, &self.cfg, &LookContext { now_ms, light: false });
+        self.presence.apply(&mut look, graph, layout, &self.style, now_ms);
+        look
     }
 
     fn on_layout(&mut self, frame: LayoutFrame) {
@@ -290,11 +358,16 @@ impl App {
     fn start_bursts(&mut self, generation: u64) {
         let (ready, waiting): (Vec<_>, Vec<_>) = self.pending_edits.drain(..).partition(|(g, _)| *g <= generation);
         self.pending_edits = waiting;
-        if ready.is_empty() || self.edit_burst.is_none() || self.paused || desktop::low_power_mode() {
+        self.burst_notes(ready.into_iter().flat_map(|(_, ids)| ids).collect());
+    }
+
+    /// Starts (or restarts) the edit burst of these notes.
+    fn burst_notes(&mut self, ids: Vec<String>) {
+        if ids.is_empty() || self.edit_burst.is_none() || !self.motion_allowed() {
             return;
         }
         let now = Instant::now();
-        for id in ready.into_iter().flat_map(|(_, ids)| ids) {
+        for id in ids {
             // Saving again while it still bleeds starts it over.
             self.bursts.retain(|(b, _)| *b != id);
             self.bursts.push((id, now));
@@ -359,6 +432,7 @@ impl App {
     fn apply_style(&mut self) {
         self.theme = Theme::from_config(&self.cfg);
         self.style = self.theme.style(&self.cfg, false);
+        self.presence.adjust_style(&mut self.style, vw_core::presence::now_ms());
         self.framing = FramingOptions::from_config(&self.cfg);
         self.edit_burst = self.theme.edit_burst(&self.cfg);
         if self.edit_burst.is_none() {
@@ -367,10 +441,16 @@ impl App {
         self.update_breathing();
     }
 
-    /// Breathing as Core Animation should run it now: off when paused, in Low Power
-    /// Mode, or when the style doesn't breathe.
+    /// Whether anything may move now: not paused, nobody away, and power allows it
+    /// (Low Power Mode never; battery only in Showcase).
+    fn motion_allowed(&self) -> bool {
+        !self.paused && !self.away && self.power.motion_allowed(self.cfg.motion_mode)
+    }
+
+    /// Breathing as Core Animation should run it now: off when motion isn't allowed,
+    /// or when the style doesn't breathe.
     fn breathing(&self) -> Option<(f32, f32, f32)> {
-        if self.paused || self.low_power {
+        if !self.motion_allowed() {
             return None;
         }
         match self.theme.ambient(&self.style) {
@@ -401,16 +481,17 @@ impl App {
         }
     }
 
-    fn add_screen(&mut self, event_loop: &ActiveEventLoop, pos: PhysicalPosition<i32>, size: PhysicalSize<u32>) {
+    fn add_screen(&mut self, event_loop: &ActiveEventLoop, geom: Geom) {
         let attrs = Window::default_attributes()
             .with_title("Vault Wallpaper")
             .with_decorations(false)
             .with_resizable(false)
-            .with_position(pos)
-            .with_inner_size(size)
+            .with_position(LogicalPosition::new(geom.x, geom.y))
+            .with_inner_size(LogicalSize::new(geom.w, geom.h))
             .with_has_shadow(false)
             .with_active(false);
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+        let size = window.inner_size();
         let ns_window = desktop::ns_window(&window);
         if let (Some(w), false) = (&ns_window, self.args.front) {
             desktop::place_on_desktop(w);
@@ -446,6 +527,7 @@ impl App {
             eprintln!("glow overlay unavailable; glow will not breathe");
         }
         self.screens.push(Screen {
+            geom,
             window,
             ns_window,
             surface,
@@ -461,7 +543,12 @@ impl App {
     }
 
     fn draw(&mut self, id: WindowId) {
+        if self.away {
+            // Nobody can see it; screens stay dirty and draw when the user is back.
+            return;
+        }
         let breathing = self.breathing();
+        let span = self.span_rect;
         let Some(gpu) = &self.gpu else { return };
         let Some(s) = self.screens.iter_mut().find(|s| s.window.id() == id) else { return };
         if !(s.frame_dirty || s.bursts_dirty) || !s.check_visible() {
@@ -469,12 +556,12 @@ impl App {
             return;
         }
         if s.frame_dirty {
-            Self::draw_scene(gpu, s, self.shown.as_ref(), self.theme, &self.style, &self.framing, breathing);
+            Self::draw_scene(gpu, s, self.shown.as_ref(), self.theme, &self.style, displays::Fit { opts: &self.framing, span }, breathing);
         }
         if s.bursts_dirty {
             s.bursts_dirty = false;
             if let (Some(burst), Some(shown)) = (self.edit_burst, &self.shown) {
-                self.burst_bytes += Self::play_bursts(gpu, s, shown, self.theme, &self.bursts, &self.framing, burst);
+                self.burst_bytes += Self::play_bursts(gpu, s, shown, self.theme, &self.bursts, displays::Fit { opts: &self.framing, span }, burst);
             }
         }
     }
@@ -486,7 +573,7 @@ impl App {
         shown: Option<&Shown>,
         theme: Theme,
         style: &SceneStyle,
-        framing: &FramingOptions,
+        fit: displays::Fit,
         breathing: Option<(f32, f32, f32)>,
     ) {
         let frame = match s.surface.get_current_texture() {
@@ -507,7 +594,7 @@ impl App {
             let points = [size[0] as f32 / scale, size[1] as f32 / scale];
             let data = match shown {
                 Some(sh) => {
-                    let framing = Framing::fit_graph(&sh.positions, &sh.layout.degree, points[0], points[1], framing);
+                    let framing = fit.framing(&sh.positions, &sh.layout.degree, s.rect());
                     theme.build(&sh.layout, &sh.look, &sh.positions, &framing, style, points)
                 }
                 None => Default::default(),
@@ -540,7 +627,7 @@ impl App {
         shown: &Shown,
         theme: Theme,
         bursts: &[(String, Instant)],
-        framing: &FramingOptions,
+        fit: displays::Fit,
         burst: EditBurst,
     ) -> usize {
         let Some(ns_window) = &s.ns_window else { return 0 };
@@ -553,10 +640,10 @@ impl App {
         if s.burst_overlay.is_none() {
             s.burst_overlay = BurstOverlay::new(gpu, ns_window);
         }
-        let Some(o) = &mut s.burst_overlay else { return 0 };
         let scale = s.window.scale_factor() as f32;
-        let points = [s.config.width as f32 / scale, s.config.height as f32 / scale];
-        let framing = Framing::fit_graph(&shown.positions, &shown.layout.degree, points[0], points[1], framing);
+        // Framed per screen exactly as its scene is (span mode included).
+        let framing = fit.framing(&shown.positions, &shown.layout.degree, s.rect());
+        let Some(o) = &mut s.burst_overlay else { return 0 };
         o.retain(|id| bursts.iter().any(|(b, _)| b == id));
         let now = Instant::now();
         let mut bytes = 0;
@@ -598,6 +685,14 @@ impl App {
                     if let Err(e) = config::save(&self.args.config, &cfg) {
                         eprintln!("could not save the config: {e}");
                     }
+                }
+            }
+            Action::ImportWebConfig => {
+                // A menu-bar app isn't frontmost: bring the dialogs forward.
+                desktop::activate();
+                // On success the config watcher picks the new file up, restyles and rescans.
+                if import::run(&self.args.config, &self.cfg) {
+                    self.args.vault = None;
                 }
             }
             Action::OpenSettings => {
@@ -676,6 +771,106 @@ impl App {
         self.bursts.iter().map(|(_, start)| *start + duration).min()
     }
 
+    /// Span mode's rectangle: the union of every display, or `None` when not spanning.
+    fn update_span(&mut self) {
+        self.span_rect = if self.span { displays::union(self.screens.iter().map(|s| s.geom.rect())) } else { None };
+    }
+
+    /// Makes the windows match the attached displays: new ones get a window, gone
+    /// ones lose theirs, moved or resized ones follow.
+    fn sync_displays(&mut self, event_loop: &ActiveEventLoop) {
+        let now = displays::monitors(event_loop);
+        let old: Vec<Geom> = self.screens.iter().map(|s| s.geom).collect();
+        let changes = displays::diff(&old, &now);
+        if changes.is_empty() {
+            return;
+        }
+        for change in changes {
+            eprintln!("[{:.0} ms] display change: {change:?}", self.ms());
+            match change {
+                displays::Change::Remove(id) => self.screens.retain(|s| s.geom.id != id),
+                displays::Change::Add(geom) => self.add_screen(event_loop, geom),
+                displays::Change::Update(geom) => {
+                    let Some(gpu) = &self.gpu else { continue };
+                    let Some(s) = self.screens.iter_mut().find(|s| s.geom.id == geom.id) else { continue };
+                    s.geom = geom;
+                    s.window.set_outer_position(LogicalPosition::new(geom.x, geom.y));
+                    let _ = s.window.request_inner_size(LogicalSize::new(geom.w, geom.h));
+                    s.resize(gpu, s.window.inner_size());
+                }
+            }
+        }
+        self.update_span();
+        self.update_breathing();
+        // Span framing depends on every display; redraw them all.
+        for s in &mut self.screens {
+            s.scene_dirty = true;
+            s.frame_dirty = true;
+            s.bursts_dirty |= s.burst_overlay.is_some();
+        }
+        self.invalidate_scene();
+    }
+
+    fn on_system(&mut self, event: SysEvent, event_loop: &ActiveEventLoop) {
+        match event {
+            SysEvent::Displays => self.sync_displays(event_loop),
+            SysEvent::Away => {
+                if !self.away {
+                    eprintln!("[{:.0} ms] away: drawing nothing", self.ms());
+                    self.away = true;
+                    self.away_check = Instant::now() + AWAY_CHECK;
+                    self.stop_bursts();
+                    self.update_breathing();
+                }
+            }
+            SysEvent::Back => {
+                if self.away {
+                    eprintln!("[{:.0} ms] back", self.ms());
+                }
+                self.away = false;
+                self.power = PowerState::read();
+                // Displays may have changed while asleep, and recency colours age.
+                self.sync_displays(event_loop);
+                if let Some(s) = self.shown.take() {
+                    let look = self.look_for(&s.graph, &s.layout);
+                    let changed = look != s.look;
+                    self.shown = Some(Shown { look, ..s });
+                    if changed {
+                        eprintln!("[{:.0} ms] look aged while away; redrawing", self.ms());
+                        self.invalidate_scene();
+                    }
+                }
+                self.update_breathing();
+                self.recheck_visibility();
+            }
+            SysEvent::Space => {
+                eprintln!("[{:.0} ms] space changed", self.ms());
+                self.recheck_visibility();
+            }
+            SysEvent::Power => {
+                let power = PowerState::read();
+                if power != self.power {
+                    eprintln!("[{:.0} ms] power: low power mode {}, on battery {}", self.ms(), power.low_power, power.on_battery);
+                    self.power = power;
+                    if !self.motion_allowed() {
+                        self.stop_bursts();
+                    }
+                    self.update_breathing();
+                }
+            }
+        }
+    }
+
+    /// Looks at every screen's visibility and draws the ones that are now visible
+    /// and out of date.
+    fn recheck_visibility(&mut self) {
+        for s in &mut self.screens {
+            if s.check_visible() && s.frame_dirty {
+                s.window.request_redraw();
+            }
+        }
+    }
+
     /// Renders the first screen's current picture to a PNG in ~/Pictures/Vault Wallpaper.
     fn export_png(&self) -> Result<PathBuf, String> {
         let (Some(gpu), Some(screen), Some(sh)) = (&self.gpu, self.screens.first(), &self.shown) else {
@@ -684,7 +879,7 @@ impl App {
         let scale = screen.window.scale_factor() as f32;
         let size = [screen.config.width, screen.config.height];
         let points = [size[0] as f32 / scale, size[1] as f32 / scale];
-        let framing = Framing::fit_graph(&sh.positions, &sh.layout.degree, points[0], points[1], &self.framing);
+        let framing = displays::screen_framing(&sh.positions, &sh.layout.degree, &self.framing, screen.rect(), self.span_rect);
         let data = self.theme.build(&sh.layout, &sh.look, &sh.positions, &framing, &self.style, points);
         let rgba = render_rgba(gpu, size, scale, &self.style, &data, 1.0);
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
@@ -702,10 +897,22 @@ impl ApplicationHandler<AppEvent> for App {
         if !self.screens.is_empty() {
             return;
         }
-        for m in event_loop.available_monitors().collect::<Vec<_>>() {
-            self.add_screen(event_loop, m.position(), m.size());
+        for geom in displays::monitors(event_loop) {
+            self.add_screen(event_loop, geom);
         }
-        eprintln!("[{:.0} ms] {} screen(s), low power mode {}", self.ms(), self.screens.len(), desktop::low_power_mode());
+        self.update_span();
+        eprintln!(
+            "[{:.0} ms] {} screen(s), low power mode {}, on battery {}, span {}",
+            self.ms(),
+            self.screens.len(),
+            self.power.low_power,
+            self.power.on_battery,
+            self.span
+        );
+        let proxy = self.proxy.clone();
+        self._system = Some(system::observe(move |e| {
+            let _ = proxy.send_event(AppEvent::System(e));
+        }));
         if std::env::var_os("VW_WINDOW_IDS").is_some() {
             for s in &self.screens {
                 if let Some(w) = &s.ns_window {
@@ -732,11 +939,13 @@ impl ApplicationHandler<AppEvent> for App {
             AppEvent::Graph(g) => self.on_graph(*g),
             AppEvent::Layout(f) => self.on_layout(*f),
             AppEvent::Config(c) => self.on_config(*c),
+            AppEvent::Presence(s) => self.on_presence(s.map(|s| *s)),
             AppEvent::Menu(e) => {
                 if let Some(action) = self.menu.as_ref().and_then(|m| m.action(&e)) {
                     self.on_action(action, event_loop);
                 }
             }
+            AppEvent::System(e) => self.on_system(e, event_loop),
         }
     }
 
@@ -762,17 +971,7 @@ impl ApplicationHandler<AppEvent> for App {
             WindowEvent::Resized(size) => {
                 let Some(gpu) = &self.gpu else { return };
                 if let Some(s) = self.screens.iter_mut().find(|s| s.window.id() == id) {
-                    s.config.width = size.width.max(1);
-                    s.config.height = size.height.max(1);
-                    s.surface.configure(&gpu.device, &s.config);
-                    if let (Some(o), Some(w)) = (&s.overlay, &s.ns_window) {
-                        o.fit(w);
-                    }
-                    if let (Some(o), Some(w)) = (&s.burst_overlay, &s.ns_window) {
-                        o.fit(w);
-                    }
-                    s.scene_dirty = true;
-                    s.frame_dirty = true;
+                    s.resize(gpu, size);
                     s.window.request_redraw();
                 }
             }
@@ -785,30 +984,33 @@ impl ApplicationHandler<AppEvent> for App {
         let now = Instant::now();
         // A screen that is hidden *and* has something new to show is re-checked once a
         // second (occlusion events alone can be missed).
+        // While away (asleep, locked) the notification that ends it does the work;
+        // a slow check covers a missed one. Power changes arrive as notifications, so
+        // nothing else wakes a still wallpaper.
         let mut wake: Option<Instant> = None;
-        for s in &mut self.screens {
-            if s.frame_dirty && !s.visible {
-                wake = Some(now + Duration::from_secs(1));
-                if s.check_visible() {
-                    s.window.request_redraw();
+        if self.away {
+            if now >= self.away_check {
+                self.away_check = now + AWAY_CHECK;
+                if self.screens.iter_mut().any(|s| s.check_visible()) {
+                    eprintln!("[{:.0} ms] a screen is visible while away; resuming", self.ms());
+                    self.on_system(SysEvent::Back, event_loop);
+                }
+            }
+            wake = Some(self.away_check);
+        } else {
+            for s in &mut self.screens {
+                if s.frame_dirty && !s.visible {
+                    wake = Some(now + Duration::from_secs(1));
+                    if s.check_visible() {
+                        s.window.request_redraw();
+                    }
                 }
             }
         }
-        // While breathing, look at Low Power Mode once a minute and stop or restart
-        // the animation to match. Nothing else wakes a still wallpaper.
-        if self.style.animates() && !self.paused {
-            if now.duration_since(self.power_checked) >= Duration::from_secs(60) {
-                self.power_checked = now;
-                let low = desktop::low_power_mode();
-                if low != self.low_power {
-                    self.low_power = low;
-                    self.update_breathing();
-                }
-            }
-            let next = self.power_checked + Duration::from_secs(60);
+        if let Some(next) = self.step_presence() {
             wake = Some(wake.map_or(next, |w| w.min(next)));
         }
-        if let Some(next) = self.step_bursts(now) {
+        if !self.away && let Some(next) = self.step_bursts(now) {
             wake = Some(wake.map_or(next, |w| w.min(next)));
         }
         event_loop.set_control_flow(match wake {
@@ -841,8 +1043,12 @@ fn main() {
         _vault_watcher: None,
         _config_watcher: None,
         started: Instant::now(),
-        power_checked: Instant::now(),
-        low_power: desktop::low_power_mode(),
+        power: PowerState::read(),
+        away: false,
+        away_check: Instant::now(),
+        span: displays::span_from_env(),
+        span_rect: None,
+        _system: None,
         menu: None,
         settings: None,
         paused: false,
@@ -850,6 +1056,7 @@ fn main() {
         pending_edits: Vec::new(),
         bursts: Vec::new(),
         burst_bytes: 0,
+        presence: Presence::default(),
     };
     app.edit_burst = app.theme.edit_burst(&app.cfg);
     event_loop.run_app(&mut app).expect("run");

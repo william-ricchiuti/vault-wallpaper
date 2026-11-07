@@ -338,6 +338,24 @@ what remains.
   theme), probably the driver's working set after drawing the full-resolution scene.
 - Still to do: a second look at the settings window with real typing.
 
+#### App robustness (2026-11-06)
+New modules in `crates/app`: `system.rs` (notification observers), `power.rs` (IOKit power
+source + motion policy), `displays.rs` (display list, diff, span framing). Nothing polls:
+every change arrives as a notification on the main queue. The old once-a-minute Low Power
+Mode poll while breathing is gone (`NSProcessInfoPowerStateDidChangeNotification` instead).
+
+| Behaviour | How it works | Verified |
+|---|---|---|
+| Display added / removed / resized / rescaled | `NSApplicationDidChangeScreenParametersNotification` → diff winit's monitors by `CGDirectDisplayID` → add, drop or move+resize windows (surface, glow overlay, burst layer) | Unit tests for the diff. On the real vault, a helper (`CGConfigureDisplayWithDisplayMode`, `.forAppOnly`, so macOS restores the mode on exit) switched 1512×982@2× → 1352×845@2× → back, and → 1920×1200@1× → back. Each logged `display change: Update(..)`; screenshots show the graph re-fitted full-screen at the new size and scale. **Not exercised:** plugging or unplugging a second monitor (only one attached); the add/remove paths run only in unit tests. |
+| Battery | `IOPSNotificationCreateRunLoopSource` on the main run loop; `IOPSGetProvidingPowerSourceType == "Battery Power"`. Off mains and not Showcase → no breathing, no edit bursts | Policy unit tests; source read at startup (`on battery false`). **Not exercised:** an actual unplug, or toggling Low Power Mode (needs `sudo pmset`). |
+| Sleep, lock, fast user switching | `NSWorkspaceScreensDidSleep/WillSleep/SessionDidResignActive` and `com.apple.screenIsLocked` → *away*: no draws, bursts stopped, breathing removed. `ScreensDidWake/DidWake/SessionDidBecomeActive` and `screenIsUnlocked` → back: re-read power, re-sync displays, re-derive the look (recency colours age) and redraw only if it changed, re-check visibility. A 60 s visibility check while away covers a missed wake notification | `pmset displaysleepnow`, 15 s, `caffeinate -u`: log shows `away`, `visible=false`, `back`, `visible=true`; 0.03 s CPU over the 15 s asleep; screenshot after wake shows the right picture. **Not exercised:** screen lock (would need William's password to undo) and fast user switching. |
+| Spaces / Mission Control | `NSWorkspaceActiveSpaceDidChangeNotification` → re-check visibility | Desktop-level run: Ctrl-→ to a desktop Space logged `space changed`, wallpaper behind icons and widgets (screenshot); back to a full-screen app Space logged `visible=false`. Mission Control: the wallpaper fills every Space thumbnail and is not listed as a window. **Not checked:** Stage Manager, leaving a full-screen app by hand, icon clicks (needs a person). |
+| Span mode | `VW_SPAN=1`: frame the union of all displays (points), then shift each screen's framing by its offset in the union (exact: the framing is linear after the outer ring). Used for scenes, burst sprites and Export PNG | Unit tests: slices tile the whole-span picture, single display equals the plain fit. Run with `VW_SPAN=1` logs `span true` and draws normally. **Not exercised** with two displays. No config key yet. |
+
+Cost, same `phase0/measure.sh` run (25 s warm-up, 30 s window, real vault, default config,
+mains power), before → after: `--front` 0.2% CPU, 97 MB → 0.2%, 97 MB; desktop 0.2%, 97 MB →
+0.2%, 96 MB. No change.
+
 ### Phase 7: Packaging and release (S–M)
 **You get:** a download that opens with no warnings and keeps itself up to date.
 - Universal binary (Apple Silicon + Intel), app bundle and `Info.plist`, icon.
@@ -357,9 +375,9 @@ what remains.
   keeps its own repo and npm package and is still improved (decided 2026-11-05).
 - **Done when:** 1.0.0 is released and web-version users can find it.
 
-### Phase 9: Obsidian plugin (S–M, optional)
+### Phase 9: Obsidian plugin (S–M, optional) — built: `obsidian-plugin/`, `vw_core::presence`
 **You get:** the wallpaper knows what you are doing in Obsidian.
-- A small plugin that writes a state file inside the vault (`.obsidian/plugins/live-wallpaper/state.json`)
+- A small plugin that writes a state file inside the vault (`.obsidian/plugins/vault-wallpaper/state.json`)
   that the app already watches. No port. Contents: the note you have open, plus Obsidian's own resolved
   links when available.
 - Features: highlight the open note and its neighbourhood, pulse on save, exact link resolution.
