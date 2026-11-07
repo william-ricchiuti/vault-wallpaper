@@ -6,8 +6,9 @@
 //! - a scene builder ([`Theme::build`]): what gets drawn into the cached scene;
 //! - an ambient motion ([`Theme::ambient`]) the window server runs on the glow layer
 //!   with no app frames, or none;
-//! - optionally, an edit burst ([`Theme::edit_burst`], [`Theme::burst_sprites`]): a
-//!   short animation over the still scene when a note is saved.
+//! - optionally, an edit burst ([`Theme::edit_burst`], [`Theme::burst_actors`]): a
+//!   short animation over the still scene when a note is saved, baked once and
+//!   played by the window server (see [`crate::burst`]).
 //!
 //! The web version's theme ids map onto the default look (they were Canvas2D designs
 //! that don't port cheaply); the native themes have ids of their own.
@@ -15,11 +16,12 @@
 mod aurora_lite;
 mod ink_paper;
 mod night_sky;
+mod pulse;
 
 use vw_core::config::Config;
 use vw_core::layout::LayoutGraph;
 
-use crate::burst::{BurstInstance, BurstKind, EditBurst};
+use crate::burst::{BurstActor, EditBurst};
 use crate::look::Look;
 use crate::scene::{SceneData, SceneStyle, build_scene, style_from_config};
 use crate::Framing;
@@ -35,6 +37,8 @@ pub enum Theme {
     AuroraLite,
     /// A printed plate: ink on warm paper, fully still.
     InkPaper,
+    /// A calm, still graph; a saved note sends light out along its links.
+    Pulse,
 }
 
 /// Motion the window server runs on its own (see the app's glow overlay).
@@ -52,6 +56,7 @@ impl Theme {
             "night-sky" => Theme::NightSky,
             "aurora-lite" => Theme::AuroraLite,
             "ink-paper" => Theme::InkPaper,
+            "pulse" => Theme::Pulse,
             _ => Theme::Default,
         }
     }
@@ -67,6 +72,7 @@ impl Theme {
             Theme::NightSky => night_sky::style(cfg, base),
             Theme::AuroraLite => aurora_lite::style(cfg, base),
             Theme::InkPaper => ink_paper::style(cfg, base),
+            Theme::Pulse => pulse::style(cfg, base),
         }
     }
 
@@ -84,6 +90,7 @@ impl Theme {
             Theme::NightSky => night_sky::build(graph, look, positions, framing, style, size),
             Theme::AuroraLite => aurora_lite::build(graph, look, positions, framing, style, size),
             Theme::InkPaper => ink_paper::build(graph, look, positions, framing, style, size),
+            Theme::Pulse => pulse::build(graph, look, positions, framing, style, size),
         }
     }
 
@@ -104,23 +111,27 @@ impl Theme {
     pub fn edit_burst(self, cfg: &Config) -> Option<EditBurst> {
         let fps = burst_fps(cfg)?;
         match self {
-            Theme::InkPaper => Some(EditBurst { kind: BurstKind::InkBleed, duration: 2.0, fps }),
+            Theme::InkPaper => Some(EditBurst { duration: 2.0, fps, resolution: 1.0 }),
+            // Soft light: baked at half resolution, scaled up by the window server.
+            Theme::Pulse => Some(EditBurst { duration: pulse::DURATION, fps, resolution: 0.5 }),
             Theme::Default | Theme::NightSky | Theme::AuroraLite => None,
         }
     }
 
-    /// The burst sprites for the edited notes `nodes` (indices into `graph`), in the
-    /// same screen points as [`Theme::build`], with progress 0.
-    pub fn burst_sprites(
+    /// The burst for the edited note `node` (an index into `graph`), in the same
+    /// screen points as [`Theme::build`]. Empty when the note has nothing to show.
+    pub fn burst_actors(
         self,
         graph: &LayoutGraph,
         look: &Look,
         positions: &[[f32; 2]],
         framing: &Framing,
-        nodes: &[usize],
-    ) -> Vec<BurstInstance> {
+        node: usize,
+        burst: &EditBurst,
+    ) -> Vec<BurstActor> {
         match self {
-            Theme::InkPaper => ink_paper::burst_sprites(graph, look, positions, framing, nodes),
+            Theme::InkPaper => ink_paper::burst_actors(graph, look, positions, framing, node, burst),
+            Theme::Pulse => pulse::burst_actors(graph, look, positions, framing, node, burst),
             Theme::Default | Theme::NightSky | Theme::AuroraLite => Vec::new(),
         }
     }

@@ -2,7 +2,7 @@
 //! bleed softly into the paper, links are fine ink lines of slightly uneven weight,
 //! hubs are bolder. Tags tint the ink with at most three muted inks. No glow and no
 //! ambient motion: everything is drawn once into the cached scene. Saving a note
-//! sends a two-second ink bleed out from its dot (see [`burst_sprites`]), drawn over
+//! sends a two-second ink bleed out from its dot (see [`burst_actors`]), drawn over
 //! the still scene and gone when it settles.
 
 use std::collections::HashMap;
@@ -13,7 +13,7 @@ use vw_core::layout::LayoutGraph;
 use crate::look::Look;
 use crate::scene::{BgMode, EdgeStyle, INK_CORE, SceneData, SceneStyle, place_labels};
 use crate::text::{FontFamily, TextStyle};
-use crate::burst::BurstInstance;
+use crate::burst::{BurstActor, BurstInstance, BurstKind, EditBurst};
 use crate::{EdgeInstance, Framing, NodeInstance};
 
 /// Warm off-white paper.
@@ -161,32 +161,26 @@ fn dot(importance: f32) -> (f32, f32) {
 /// The ink bleed for each edited note: fresh ink on its dot and a wet front that
 /// settles a little past the dot's printed bleed (at least 14 pt out, so small notes
 /// show too).
-pub(super) fn burst_sprites(
+pub(super) fn burst_actors(
     graph: &LayoutGraph,
     look: &Look,
     positions: &[[f32; 2]],
     framing: &Framing,
-    nodes: &[usize],
-) -> Vec<BurstInstance> {
+    node: usize,
+    burst: &EditBurst,
+) -> Vec<BurstActor> {
     let n = positions.len().min(graph.len());
+    if node >= n || graph.ghost[node] || look.node_color.get(node).is_some_and(|c| c[3] <= 0.0) {
+        return Vec::new();
+    }
     // The same ink assignment as the scene, so a bleed matches its dot.
     let inks = Inks::new((0..n).filter(|&i| !graph.ghost[i]).filter_map(|i| graph.tag[i].as_deref()));
-    nodes
-        .iter()
-        .copied()
-        .filter(|&i| i < n && !graph.ghost[i] && look.node_color.get(i).is_none_or(|c| c[3] > 0.0))
-        .map(|i| {
-            let (core, alpha) = dot(look.node_importance.get(i).copied().unwrap_or(0.0));
-            let [r, g, b] = inks.get(graph.tag[i].as_deref());
-            BurstInstance {
-                center: framing.apply(positions[i]),
-                core,
-                reach: (core / INK_CORE * 1.9).max(core + 14.0),
-                color: [r, g, b, alpha],
-                progress: 0.0,
-            }
-        })
-        .collect()
+    let (core, alpha) = dot(look.node_importance.get(node).copied().unwrap_or(0.0));
+    let [r, g, b] = inks.get(graph.tag[node].as_deref());
+    let sprite = BurstInstance { center: [0.0; 2], core, reach: (core / INK_CORE * 1.9).max(core + 14.0), color: [r, g, b, alpha], progress: 0.0 };
+    // One frame per frame-rate step, the last one fully transparent.
+    let frames = (burst.duration * burst.fps).round().max(2.0) as u32 + 1;
+    vec![BurstActor::fixed(BurstKind::InkBleed, sprite, frames, [0.0, 1.0], framing.apply(positions[node]))]
 }
 
 #[cfg(test)]
@@ -230,7 +224,6 @@ mod tests {
         assert!(theme.edit_burst(&still).is_none());
         let light = Config { motion_mode: vw_core::config::MotionMode::Light, ..Config::default() };
         let burst = theme.edit_burst(&light).expect("bleeds in Light");
-        assert_eq!(burst.kind, crate::BurstKind::InkBleed);
         assert_eq!(burst.duration, 2.0);
         assert!(burst.fps > 0.0 && burst.fps <= 20.0);
         let capped = Config { max_fps: 5, ..light.clone() };
@@ -255,15 +248,22 @@ mod tests {
         let framing = Framing { tx: 5.0, ..Framing::IDENTITY };
         let style = Theme::InkPaper.style(&Config::default(), false);
         let scene = build(&graph, &look, &positions, &framing, &style, [200.0, 200.0]);
-        let sprites = Theme::InkPaper.burst_sprites(&graph, &look, &positions, &framing, &[0, 1, 2, 9]);
+        let burst = EditBurst { duration: 2.0, fps: 12.0, resolution: 1.0 };
+        let actors: Vec<BurstActor> =
+            [0, 1, 2, 9].iter().flat_map(|&i| Theme::InkPaper.burst_actors(&graph, &look, &positions, &framing, i, &burst)).collect();
         // Ghosts and out-of-range indices have no ink to bleed.
-        assert_eq!(sprites.len(), 2);
-        for s in &sprites {
-            let ink = scene.inks.iter().find(|k| k.center == s.center).expect("matches a printed dot");
+        assert_eq!(actors.len(), 2);
+        for a in &actors {
+            let (at, opacity) = a.at(0.5);
+            assert_eq!(opacity, 1.0);
+            let s = a.sprite;
+            let ink = scene.inks.iter().find(|k| k.center == at).expect("matches a printed dot");
             assert!((s.core - ink.radius * INK_CORE).abs() < 1e-4);
             assert_eq!(s.color, ink.color);
             assert!(s.reach >= s.core + 14.0 && s.reach >= ink.radius);
-            assert_eq!(s.progress, 0.0);
+            // A frame per step at 12 fps, ending on the transparent one.
+            assert_eq!(a.frames, 25);
+            assert_eq!(a.frame_at(1.0), 24);
         }
     }
 }

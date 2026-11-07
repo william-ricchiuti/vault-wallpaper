@@ -1,8 +1,8 @@
-// Edit bursts: a few sprites drawn over the cached scene for the second or two an
-// edit animates, into a small overlay region (not the whole screen). Positions are in
-// screen points; `u.origin` is the region's top-left corner on the screen.
+// Edit bursts: sprite images baked once into a small atlas (see burst.rs), which
+// Core Animation then moves and fades. Positions are in atlas points; each sprite is
+// centred in its own cell, and `progress` picks the frame for animated kinds.
 //
-// Output is premultiplied: the overlay is a transparent Core Animation layer.
+// Output is premultiplied, as Core Animation expects.
 
 struct BurstUniforms {
   origin: vec2<f32>,    // region top-left, screen points
@@ -96,4 +96,48 @@ const FRONT_SLACK: f32 = 1.2;
   let fresh = 0.38 * on_dot;
   let alpha = clamp(in.color.a * wet * (fresh + (1.0 - on_dot) * (inside * wash + tide) * fibre), 0.0, 1.0);
   return vec4<f32>(in.color.rgb * alpha, alpha);
+}
+
+// ---- Pulse: light travelling out along links from a saved note. ----
+
+// A ring of light opening out from the saved note, with a brief flash on the dot.
+// Gone at progress 1.
+@fragment fn pulse_ring_fs(in: BurstOut) -> @location(0) vec4<f32> {
+  let p = clamp(in.progress, 0.0, 1.0);
+  let d = length(in.local);
+  let r = mix(in.core, in.reach, 1.0 - pow(1.0 - p, 3.0));
+  let w = mix(1.2, 3.5, p);
+  let fade = pow(1.0 - p, 1.5);
+  let ring = exp(-pow((d - r) / w, 2.0)) * fade * 0.85;
+  let flash = exp(-pow(d / (in.core * 1.6), 2.0)) * pow(1.0 - p, 3.0);
+  let alpha = clamp(in.color.a * (ring + flash), 0.0, 1.0);
+  let rgb = mix(in.color.rgb, vec3<f32>(1.0), flash * 0.6);
+  return vec4<f32>(rgb * alpha, alpha);
+}
+
+// A travelling pulse: a bright head at the centre and a tail trailing towards -x,
+// thinning and fading. Core Animation turns it along the link and moves it.
+@fragment fn pulse_comet_fs(in: BurstOut) -> @location(0) vec4<f32> {
+  let x = in.local.x;
+  let y = in.local.y;
+  let d = length(in.local);
+  let head = exp(-pow(d / in.core, 2.0));
+  let halo = exp(-pow(d / (in.core * 2.2), 2.0)) * 0.30;
+  let t = clamp(-x / in.reach, 0.0, 1.0);
+  let behind = select(0.0, 1.0, x < 0.0);
+  let width = in.core * mix(0.75, 0.2, t);
+  let tail = behind * pow(1.0 - t, 2.0) * exp(-pow(y / width, 2.0)) * 0.75;
+  let alpha = clamp(in.color.a * max(head + halo, tail), 0.0, 1.0);
+  let rgb = mix(in.color.rgb, vec3<f32>(1.0), head * 0.55);
+  return vec4<f32>(rgb * alpha, alpha);
+}
+
+// A soft glint on a note a pulse reaches: a bright point in a small soft halo.
+@fragment fn pulse_glint_fs(in: BurstOut) -> @location(0) vec4<f32> {
+  let d = length(in.local);
+  let point = exp(-pow(d / in.core, 2.0));
+  let halo = exp(-pow(d / (in.reach * 0.42), 2.0)) * 0.32;
+  let alpha = clamp(in.color.a * (point + halo), 0.0, 1.0);
+  let rgb = mix(in.color.rgb, vec3<f32>(1.0), point * 0.5);
+  return vec4<f32>(rgb * alpha, alpha);
 }

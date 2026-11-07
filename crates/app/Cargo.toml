@@ -6,7 +6,9 @@ edition = "2024"
 [dependencies]
 objc2 = "0.6.5"
 objc2-app-kit = "0.3.2"
-objc2-foundation = "0.3.2"
+objc2-foundation = { version = "0.3.2", features = ["NSGeometry", "NSValue"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFData", "CFCGTypes", "CFString"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGImage", "CGColorSpace", "CGDataProvider"] }
 objc2-quartz-core = { version = "0.3", features = ["CALayer", "CAMetalLayer", "CAAnimation", "CAMediaTiming", "CAMediaTimingFunction", "CAFrameRateRange", "CATransaction", "objc2-core-foundation"] }
 objc2-service-management = "0.3"
 raw-window-handle = "0.6.2"

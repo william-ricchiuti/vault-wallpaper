@@ -9,9 +9,10 @@
 //! Threads: the vault watcher, the config watcher and the layout engine run in the
 //! background and post results to the main thread. The main thread redraws the cached
 //! scene only when something changed, and runs cheap composite-only frames while glow
-//! breathes. Saving a note can start a short edit burst (Ink & Paper's ink bleed),
-//! drawn at a low frame rate into a small overlay layer over the still scene; when it
-//! ends the layer hides. A settled, still wallpaper draws nothing at all.
+//! breathes. Saving a note can start a short edit burst (Ink & Paper's ink bleed,
+//! Pulse's travelling light): baked once into a small atlas and played by Core
+//! Animation over the still scene, with no app frames; when it ends its layers are
+//! removed. A settled, still wallpaper draws nothing at all.
 
 mod desktop;
 mod menu;
@@ -32,7 +33,7 @@ use overlay::{BurstOverlay, GlowOverlay};
 use settings::SettingsWindow;
 use tray_icon::menu::MenuEvent;
 use vw_render::{
-    Ambient, BurstInstance, EditBurst, Framing, FramingOptions, Gpu, Look, LookContext, SceneStyle, Theme, WallpaperRenderer, derive_look, preferred_format,
+    Ambient, EditBurst, Framing, FramingOptions, Gpu, Look, LookContext, SceneStyle, Theme, WallpaperRenderer, derive_look, preferred_format,
     render_rgba, write_png,
 };
 use winit::application::ApplicationHandler;
@@ -119,14 +120,11 @@ struct Screen {
     /// The screen needs a composite (after a scene change, or an animation step).
     frame_dirty: bool,
     visible: bool,
-    /// Edit bursts' layer, made on the first burst this screen shows.
+    /// Edit bursts' layers, made on the first burst this screen shows.
     burst_overlay: Option<BurstOverlay>,
-    /// This screen's sprites for the running bursts, with each burst's start.
-    sprites: Vec<(Instant, BurstInstance)>,
-    /// `sprites` must be recomputed (bursts started or ended, or the scene moved).
-    sprites_dirty: bool,
-    /// A burst frame is due.
-    burst_due: bool,
+    /// The running bursts must be (re)baked and started on this screen (bursts
+    /// started, or the scene moved under them).
+    bursts_dirty: bool,
 }
 
 impl Screen {
@@ -177,10 +175,8 @@ struct App {
     pending_edits: Vec<(u64, Vec<String>)>,
     /// Running bursts: the edited note's id and when its burst started.
     bursts: Vec<(String, Instant)>,
-    /// When the next burst frame is due.
-    burst_next: Instant,
-    /// Burst frames drawn since the bursts last settled (for the log).
-    burst_frames: u32,
+    /// Atlas bytes baked since the bursts last settled (for the log).
+    burst_bytes: usize,
 }
 
 impl App {
@@ -305,9 +301,11 @@ impl App {
         }
         self.bursts.truncate(MAX_BURSTS);
         eprintln!("[{:.0} ms] edit burst: {} note(s)", self.ms(), self.bursts.len());
-        self.burst_next = now;
         for s in &mut self.screens {
-            s.sprites_dirty = true;
+            s.bursts_dirty = true;
+            if s.check_visible() {
+                s.window.request_redraw();
+            }
         }
     }
 
@@ -315,12 +313,10 @@ impl App {
     fn stop_bursts(&mut self) {
         self.bursts.clear();
         self.pending_edits.clear();
-        let Some(gpu) = &self.gpu else { return };
         for s in &mut self.screens {
-            s.sprites.clear();
-            s.burst_due = false;
+            s.bursts_dirty = false;
             if let Some(o) = &mut s.burst_overlay {
-                o.hide(gpu);
+                o.clear();
             }
         }
     }
@@ -460,9 +456,7 @@ impl App {
             frame_dirty: true,
             visible: true,
             burst_overlay: None,
-            sprites: Vec::new(),
-            sprites_dirty: true,
-            burst_due: false,
+            bursts_dirty: false,
         });
     }
 
@@ -470,18 +464,17 @@ impl App {
         let breathing = self.breathing();
         let Some(gpu) = &self.gpu else { return };
         let Some(s) = self.screens.iter_mut().find(|s| s.window.id() == id) else { return };
-        if !(s.frame_dirty || s.burst_due) || !s.check_visible() {
+        if !(s.frame_dirty || s.bursts_dirty) || !s.check_visible() {
             // Nothing new, or hidden: a hidden screen stays dirty and draws when seen.
             return;
         }
         if s.frame_dirty {
             Self::draw_scene(gpu, s, self.shown.as_ref(), self.theme, &self.style, &self.framing, breathing);
         }
-        if s.burst_due {
-            s.burst_due = false;
+        if s.bursts_dirty {
+            s.bursts_dirty = false;
             if let (Some(burst), Some(shown)) = (self.edit_burst, &self.shown) {
-                Self::draw_bursts(gpu, s, shown, self.theme, &self.bursts, &self.framing, burst);
-                self.burst_frames += 1;
+                self.burst_bytes += Self::play_bursts(gpu, s, shown, self.theme, &self.bursts, &self.framing, burst);
             }
         }
     }
@@ -522,7 +515,7 @@ impl App {
             s.renderer.set_scene(gpu, size, scale, &data, style);
             s.scene_dirty = false;
             // Notes may have moved under running bursts.
-            s.sprites_dirty = true;
+            s.bursts_dirty |= s.burst_overlay.is_some();
         }
         let view = frame.texture.create_view(&Default::default());
         match &mut s.overlay {
@@ -538,9 +531,10 @@ impl App {
         s.frame_dirty = false;
     }
 
-    /// One burst frame into the screen's burst layer: a few sprites, each at its own
-    /// progress. The scene is not touched.
-    fn draw_bursts(
+    /// Bakes the running bursts for this screen and hands them to Core Animation,
+    /// each `elapsed` into its run. The scene is not touched, and no frame is
+    /// presented. Returns the atlas bytes baked.
+    fn play_bursts(
         gpu: &Gpu,
         s: &mut Screen,
         shown: &Shown,
@@ -548,43 +542,33 @@ impl App {
         bursts: &[(String, Instant)],
         framing: &FramingOptions,
         burst: EditBurst,
-    ) {
-        let Some(ns_window) = &s.ns_window else { return };
+    ) -> usize {
+        let Some(ns_window) = &s.ns_window else { return 0 };
+        if bursts.is_empty() {
+            if let Some(o) = &mut s.burst_overlay {
+                o.clear();
+            }
+            return 0;
+        }
+        if s.burst_overlay.is_none() {
+            s.burst_overlay = BurstOverlay::new(gpu, ns_window);
+        }
+        let Some(o) = &mut s.burst_overlay else { return 0 };
         let scale = s.window.scale_factor() as f32;
         let points = [s.config.width as f32 / scale, s.config.height as f32 / scale];
-        if s.sprites_dirty {
-            s.sprites_dirty = false;
-            let framing = Framing::fit_graph(&shown.positions, &shown.layout.degree, points[0], points[1], framing);
-            s.sprites = bursts
-                .iter()
-                .filter_map(|(id, start)| {
-                    let i = shown.layout.id.iter().position(|x| x == id)?;
-                    let sprite = theme.burst_sprites(&shown.layout, &shown.look, &shown.positions, &framing, &[i]).pop()?;
-                    Some((*start, sprite))
-                })
-                .collect();
-            let Some(region) = vw_render::burst::region(&s.sprites.iter().map(|(_, b)| *b).collect::<Vec<_>>(), points) else {
-                s.sprites.clear();
-                if let Some(o) = &mut s.burst_overlay {
-                    o.hide(gpu);
-                }
-                return;
-            };
-            if s.burst_overlay.is_none() {
-                s.burst_overlay = BurstOverlay::new(gpu, ns_window, s.config.format);
-            }
-            if let Some(o) = &mut s.burst_overlay {
-                o.set_region(gpu, ns_window, region, scale);
-            }
-        }
-        let (Some(o), false) = (&mut s.burst_overlay, s.sprites.is_empty()) else { return };
+        let framing = Framing::fit_graph(&shown.positions, &shown.layout.degree, points[0], points[1], framing);
+        o.retain(|id| bursts.iter().any(|(b, _)| b == id));
         let now = Instant::now();
-        let frame: Vec<BurstInstance> = s
-            .sprites
-            .iter()
-            .map(|(start, b)| BurstInstance { progress: vw_render::burst::progress(now - *start, burst.duration), ..*b })
-            .collect();
-        o.draw(gpu, burst.kind, &frame);
+        let mut bytes = 0;
+        for (id, start) in bursts {
+            let Some(i) = shown.layout.id.iter().position(|x| x == id) else {
+                o.remove(id);
+                continue;
+            };
+            let actors = theme.burst_actors(&shown.layout, &shown.look, &shown.positions, &framing, i, &burst);
+            bytes += o.play(gpu, id, &actors, &burst, now.duration_since(*start).as_secs_f32(), scale);
+        }
+        bytes
     }
 
     fn on_action(&mut self, action: Action, event_loop: &ActiveEventLoop) {
@@ -660,8 +644,8 @@ impl App {
         }
     }
 
-    /// Ends finished bursts and asks for the next burst frame when one is due.
-    /// Returns when to wake for the next one; `None` once every burst has settled.
+    /// Removes finished bursts' layers. Core Animation plays the bursts; the app
+    /// only wakes when one ends. Returns that time; `None` once all have settled.
     fn step_bursts(&mut self, now: Instant) -> Option<Instant> {
         let burst = self.edit_burst?;
         if self.bursts.is_empty() {
@@ -670,28 +654,26 @@ impl App {
         let duration = Duration::from_secs_f32(burst.duration);
         let before = self.bursts.len();
         self.bursts.retain(|(_, start)| now.duration_since(*start) < duration);
-        if self.bursts.len() != before {
-            for s in &mut self.screens {
-                s.sprites_dirty = true;
-            }
-        }
         if self.bursts.is_empty() {
             // Settled: the still scene underneath is the final state.
-            eprintln!("[{:.0} ms] edit bursts settled after {} frame(s)", self.ms(), self.burst_frames);
-            self.burst_frames = 0;
+            eprintln!(
+                "[{:.0} ms] edit bursts settled ({} KB baked, no frames presented)",
+                self.ms(),
+                self.burst_bytes.div_ceil(1024)
+            );
+            self.burst_bytes = 0;
             self.stop_bursts();
             return None;
         }
-        if now >= self.burst_next {
+        if self.bursts.len() != before {
+            let running = &self.bursts;
             for s in &mut self.screens {
-                if s.visible {
-                    s.burst_due = true;
-                    s.window.request_redraw();
+                if let Some(o) = &mut s.burst_overlay {
+                    o.retain(|id| running.iter().any(|(b, _)| b == id));
                 }
             }
-            self.burst_next = now + Duration::from_secs_f32(1.0 / burst.fps);
         }
-        Some(self.burst_next)
+        self.bursts.iter().map(|(_, start)| *start + duration).min()
     }
 
     /// Renders the first screen's current picture to a PNG in ~/Pictures/Vault Wallpaper.
@@ -786,6 +768,9 @@ impl ApplicationHandler<AppEvent> for App {
                     if let (Some(o), Some(w)) = (&s.overlay, &s.ns_window) {
                         o.fit(w);
                     }
+                    if let (Some(o), Some(w)) = (&s.burst_overlay, &s.ns_window) {
+                        o.fit(w);
+                    }
                     s.scene_dirty = true;
                     s.frame_dirty = true;
                     s.window.request_redraw();
@@ -864,8 +849,7 @@ fn main() {
         edit_burst: None,
         pending_edits: Vec::new(),
         bursts: Vec::new(),
-        burst_next: Instant::now(),
-        burst_frames: 0,
+        burst_bytes: 0,
     };
     app.edit_burst = app.theme.edit_burst(&app.cfg);
     event_loop.run_app(&mut app).expect("run");
