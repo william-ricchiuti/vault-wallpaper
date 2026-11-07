@@ -169,13 +169,15 @@ pub(super) fn burst_sprites(
     nodes: &[usize],
 ) -> Vec<BurstInstance> {
     let n = positions.len().min(graph.len());
+    // The same ink assignment as the scene, so a bleed matches its dot.
+    let inks = Inks::new((0..n).filter(|&i| !graph.ghost[i]).filter_map(|i| graph.tag[i].as_deref()));
     nodes
         .iter()
         .copied()
         .filter(|&i| i < n && !graph.ghost[i] && look.node_color.get(i).is_none_or(|c| c[3] > 0.0))
         .map(|i| {
             let (core, alpha) = dot(look.node_importance.get(i).copied().unwrap_or(0.0));
-            let [r, g, b] = ink(graph.tag[i].as_deref());
+            let [r, g, b] = inks.get(graph.tag[i].as_deref());
             BurstInstance {
                 center: framing.apply(positions[i]),
                 core,

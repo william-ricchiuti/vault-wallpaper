@@ -105,7 +105,7 @@ impl Theme {
         let fps = burst_fps(cfg)?;
         match self {
             Theme::InkPaper => Some(EditBurst { kind: BurstKind::InkBleed, duration: 2.0, fps }),
-            Theme::Default | Theme::NightSky => None,
+            Theme::Default | Theme::NightSky | Theme::AuroraLite => None,
         }
     }
 
@@ -121,7 +121,7 @@ impl Theme {
     ) -> Vec<BurstInstance> {
         match self {
             Theme::InkPaper => ink_paper::burst_sprites(graph, look, positions, framing, nodes),
-            Theme::Default | Theme::NightSky => Vec::new(),
+            Theme::Default | Theme::NightSky | Theme::AuroraLite => Vec::new(),
         }
     }
 }

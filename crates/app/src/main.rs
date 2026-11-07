@@ -497,7 +497,7 @@ impl App {
             let points = [size[0] as f32 / scale, size[1] as f32 / scale];
             let data = match shown {
                 Some(sh) => {
-                    let framing = Framing::fit(&sh.positions, points[0], points[1], framing);
+                    let framing = Framing::fit_graph(&sh.positions, &sh.layout.degree, points[0], points[1], framing);
                     theme.build(&sh.layout, &sh.look, &sh.positions, &framing, style, points)
                 }
                 None => Default::default(),
@@ -537,7 +537,7 @@ impl App {
         let points = [s.config.width as f32 / scale, s.config.height as f32 / scale];
         if s.sprites_dirty {
             s.sprites_dirty = false;
-            let framing = Framing::fit(&shown.positions, points[0], points[1], framing);
+            let framing = Framing::fit_graph(&shown.positions, &shown.layout.degree, points[0], points[1], framing);
             s.sprites = bursts
                 .iter()
                 .filter_map(|(id, start)| {
@@ -668,7 +668,7 @@ impl App {
         let scale = screen.window.scale_factor() as f32;
         let size = [screen.config.width, screen.config.height];
         let points = [size[0] as f32 / scale, size[1] as f32 / scale];
-        let framing = Framing::fit(&sh.positions, points[0], points[1], &self.framing);
+        let framing = Framing::fit_graph(&sh.positions, &sh.layout.degree, points[0], points[1], &self.framing);
         let data = self.theme.build(&sh.layout, &sh.look, &sh.positions, &framing, &self.style, points);
         let rgba = render_rgba(gpu, size, scale, &self.style, &data, 1.0);
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
