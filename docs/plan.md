@@ -300,9 +300,43 @@ what remains.
   looks on the real vault: `docs/phase6/all-themes.png`. Themed scenes render in ~35 ms.
 - Framing now fits the linked core and pushes unlinked notes to an outer ring, so dense
   vaults fill the screen.
-- Ink bleed cost: memory rises to ~294 MB for the 2 s of a burst (presented frames) and
-  returns to ~103 MB right after; ~0.1 s CPU per burst. Possible later: a smaller burst layer.
-- Still to do: Pulse; a second look at the settings window with real typing.
+- **Pulse** (`pulse`): a still graph in slate grey with a hint of tag hue per note (not the
+  default look's colours, which turn a big vault into a purple haze), fine links, faint glow
+  on hubs only. Saving a note opens a ring on it, sends pulses along its drawn links to up
+  to 20 neighbours (which glint), then dimmer pulses one hop further (up to 28), and is
+  still again after 2.6 s. `motionMode: still` (and Low Power Mode, pause): the edit just
+  redraws. Images: `docs/phase6/pulse.png`, `pulse-burst.png` (off-screen, hub at 30 %),
+  `pulse-live.png` (the running app, 1.3 s after a save).
+- **Bursts are baked, not presented.** A theme describes a burst as a few actors (a sprite
+  image or a short strip of frames, plus position and opacity keys); `BurstRenderer::bake`
+  draws them all into one small atlas in one pass (~1 ms), and the app turns each actor
+  into a small Core Animation layer with keyframe animations (position, opacity,
+  `contentsRect` frames), capped at the burst fps. The app presents no frames and wakes
+  only when a burst ends. Atlases: Pulse ~1.2 MB on the fixture, ~2.2 MB for a hub on
+  the real vault (98 actors at 1 px/pt); ink bleed ~2.2 MB (25 frames at 2 px/pt).
+- **Burst cost, measured 2026-11-06** (fixture vault, one save, `footprint` and `ps`
+  sampled around the edit, two runs each, scripts in the Pulse session notes):
+
+  | | Peak | Time at peak | 3 s after | Settled | App CPU per edit |
+  |---|---|---|---|---|---|
+  | Ink bleed, before (24 presented frames) | 293 MB | ~3.2 s | 290 MB | 102 MB | 0.06–0.08 s |
+  | Ink bleed, baked | 313–318 MB | ~1.4 s | 113 MB | 113 MB | 0.02–0.03 s |
+  | Pulse, baked | 328 MB | ~1.4 s | 115 MB | 115 MB | 0.02–0.05 s |
+  | Edit with `motionMode: still` (no burst) | 292–316 MB | ~1.2 s | 109–209 MB | 101–138 MB | 0.02–0.03 s |
+
+  WindowServer CPU per burst: ~0.1–0.2 s before and after (the 0.1 s resolution of `ps`).
+  Six saves in a row stay flat at ~115 MB (no leak).
+- **What the measurements showed.** The ~294 MB was never the burst layer: any GPU work,
+  even one scene redraw, dirties ~210 MB of Metal driver memory ("owned physical footprint
+  (graphics)"), which the driver gives back ~1.1 s after the GPU goes idle. Presenting
+  burst frames kept the GPU busy, so the spike lasted the whole burst; a smaller layer or
+  fewer drawables would not have helped (the old layer was already ~150 px). Baking does
+  its GPU work inside the redraw's own window, so the spike is no longer than a still
+  edit's. Left over: the baked path settles ~10 MB higher than before (Malloc Large and
+  Core Animation; dropping the bake pipelines after each burst did not change it).
+- Possible later: the redraw spike itself (~210 MB for ~1 s on every edit, in every
+  theme), probably the driver's working set after drawing the full-resolution scene.
+- Still to do: a second look at the settings window with real typing.
 
 ### Phase 7: Packaging and release (S–M)
 **You get:** a download that opens with no warnings and keeps itself up to date.
