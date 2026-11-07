@@ -10,6 +10,7 @@
 //! The web version's theme ids map onto the default look (they were Canvas2D designs
 //! that don't port cheaply); the native themes have ids of their own.
 
+mod ink_paper;
 mod night_sky;
 
 use vw_core::config::Config;
@@ -26,6 +27,8 @@ pub enum Theme {
     Default,
     /// Notes as stars, tags as constellations.
     NightSky,
+    /// A printed plate: ink on warm paper, fully still.
+    InkPaper,
 }
 
 /// Motion the window server runs on its own (see the app's glow overlay).
@@ -41,6 +44,7 @@ impl Theme {
     pub fn from_id(id: &str) -> Theme {
         match id {
             "night-sky" => Theme::NightSky,
+            "ink-paper" => Theme::InkPaper,
             _ => Theme::Default,
         }
     }
@@ -54,6 +58,7 @@ impl Theme {
         match self {
             Theme::Default => base,
             Theme::NightSky => night_sky::style(cfg, base),
+            Theme::InkPaper => ink_paper::style(cfg, base),
         }
     }
 
@@ -69,6 +74,7 @@ impl Theme {
         match self {
             Theme::Default => build_scene(graph, look, positions, framing, style, size),
             Theme::NightSky => night_sky::build(graph, look, positions, framing, style, size),
+            Theme::InkPaper => ink_paper::build(graph, look, positions, framing, style, size),
         }
     }
 

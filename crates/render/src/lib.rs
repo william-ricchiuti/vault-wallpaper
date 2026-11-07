@@ -176,6 +176,7 @@ struct Pipelines {
     edges: wgpu::RenderPipeline,
     nodes: wgpu::RenderPipeline,
     stars: wgpu::RenderPipeline,
+    inks: wgpu::RenderPipeline,
     glow: wgpu::RenderPipeline,
     blur: wgpu::RenderPipeline,
     composite: wgpu::RenderPipeline,
@@ -249,6 +250,7 @@ impl Pipelines {
             edges: make(&scene_mod, &scene_layout, "edge_vs", "edge_fs", &[Some(edge_layout)], SCENE_FORMAT, alpha),
             nodes: make(&scene_mod, &scene_layout, "node_vs", "node_fs", std::slice::from_ref(&node), SCENE_FORMAT, alpha),
             stars: make(&scene_mod, &scene_layout, "node_vs", "star_fs", std::slice::from_ref(&node), SCENE_FORMAT, alpha),
+            inks: make(&scene_mod, &scene_layout, "ink_vs", "ink_fs", std::slice::from_ref(&node), SCENE_FORMAT, alpha),
             glow: make(&scene_mod, &scene_layout, "node_vs", "glow_fs", std::slice::from_ref(&node), GLOW_FORMAT, additive),
             blur: make(&post_mod, &blur_layout, "full_vs", "blur_fs", &[], GLOW_FORMAT, None),
             composite: make(&post_mod, &composite_layout, "full_vs", "composite_fs", &[], out_format, None),
@@ -305,6 +307,7 @@ pub struct WallpaperRenderer {
     edge_buf: Option<wgpu::Buffer>,
     node_buf: Option<wgpu::Buffer>,
     star_buf: Option<wgpu::Buffer>,
+    ink_buf: Option<wgpu::Buffer>,
     glow_buf: Option<wgpu::Buffer>,
     has_glow: bool,
 }
@@ -347,6 +350,7 @@ impl WallpaperRenderer {
             edge_buf: None,
             node_buf: None,
             star_buf: None,
+            ink_buf: None,
             glow_buf: None,
             has_glow: false,
         }
@@ -411,6 +415,7 @@ impl WallpaperRenderer {
         let edges = instance_buffer(gpu, &mut self.edge_buf, &data.edges, "edges");
         let nodes = instance_buffer(gpu, &mut self.node_buf, &data.nodes, "nodes");
         let stars = instance_buffer(gpu, &mut self.star_buf, &data.stars, "stars");
+        let inks = instance_buffer(gpu, &mut self.ink_buf, &data.inks, "inks");
         let glows = instance_buffer(gpu, &mut self.glow_buf, &data.glow, "glow");
         self.has_glow = glows > 0 && style.glow > 0.0;
         self.text.prepare(gpu, &data.text, size, scale);
@@ -440,6 +445,7 @@ impl WallpaperRenderer {
             draw_instances(&mut pass, &p.edges, &self.edge_buf, edges);
             draw_instances(&mut pass, &p.nodes, &self.node_buf, nodes);
             draw_instances(&mut pass, &p.stars, &self.star_buf, stars);
+            draw_instances(&mut pass, &p.inks, &self.ink_buf, inks);
             self.text.render(&mut pass);
         }
         if self.has_glow {
