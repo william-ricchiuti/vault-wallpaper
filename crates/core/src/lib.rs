@@ -2,4 +2,5 @@
 
 pub mod config;
 pub mod layout;
+pub mod presence;
 pub mod vault;
