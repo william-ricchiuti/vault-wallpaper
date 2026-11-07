@@ -93,6 +93,18 @@
   .theme-tile .name { font-size: 13px; font-weight: 600; display: flex; justify-content: space-between; gap: 6px; }
   .theme-tile .badge { font-size: 10px; font-weight: 500; color: var(--dim); text-transform: uppercase; letter-spacing: 0.5px; }
   .theme-tile .desc { font-size: 11px; color: var(--dim); line-height: 1.35; }
+  #themeGrid { grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); }
+  .theme-tile.has-preview { padding: 0; overflow: hidden; gap: 0; }
+  .theme-tile .preview { width: 100%; aspect-ratio: 1512/982; background: #000 center/cover no-repeat; border-bottom: 1px solid var(--border); }
+  .theme-tile .preview.none { display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--dim); background: var(--surface-2); }
+  .theme-tile.has-preview .tile-text { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; }
+  .theme-note { font-size: 12px; color: var(--dim); margin-top: 10px; line-height: 1.45; }
+  .webonly { display: inline-block; margin-left: 6px; padding: 0 5px; font-size: 10px; font-weight: 500; color: var(--dim); border: 1px solid var(--border); border-radius: 4px; text-transform: uppercase; letter-spacing: 0.4px; vertical-align: 1px; }
+  .explain { padding: 12px 16px; font-size: 12px; color: var(--dim); line-height: 1.5; border-bottom: 1px solid var(--border); }
+  .explain p { margin: 0 0 6px; }
+  .explain p:last-child { margin-bottom: 0; }
+  .explain ul { margin: 0 0 6px; padding-left: 18px; }
+  .explain strong { color: var(--text); font-weight: 600; }
 
   .preset-wrap { position: relative; }
   .preset { display: flex; flex-direction: column; width: 100%; height: 100%; padding: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; overflow: hidden; text-align: left; transition: border-color 0.15s; }
@@ -149,6 +161,7 @@
     <section class="group" aria-labelledby="h-style">
       <h2 id="h-style">Style</h2>
       <div class="tile-grid" id="themeGrid" role="group" aria-labelledby="h-style"><div class="empty">Loading styles…</div></div>
+      <p class="theme-note" id="themeNote">The web version's other styles (Aurora, Bauhaus, Phosphor and the rest) aren't drawn by the Mac app. A config that names one shows Breathing Glow.</p>
     </section>
 
     <section class="group" aria-labelledby="h-presets">
@@ -223,7 +236,17 @@
 
     <section class="group" aria-labelledby="h-motion">
       <h2 id="h-motion">Motion &amp; effects</h2>
-      <div class="card" data-fields="motion"></div>
+      <div class="card">
+        <div class="explain" id="motionExplain">
+          <p><strong>Motion is off by default.</strong> A still wallpaper draws nothing, so it costs no battery. Turn it on with Motion mode; every level does the same things, only smoother:</p>
+          <ul>
+            <li><strong>Breathing:</strong> the glow slowly fades in and out (Night Sky, Aurora Lite, and Breathing Glow when Glow breathing is on). macOS's window server animates it, so the app itself draws no frames.</li>
+            <li><strong>Edit bursts:</strong> saving a note plays a short animation that settles back to still (Ink &amp; Paper's ink bleed, Pulse's light along links).</li>
+          </ul>
+          <p>Light, Balanced and Showcase run these at about 4, 8 or 15 frames a second (bursts 8, 12 or 20), never above Max FPS. Settings marked <span class="webonly">web only</span> are kept for the web version and don't change the Mac app yet.</p>
+        </div>
+        <div data-fields="motion"></div>
+      </div>
     </section>
 
     <section class="group" aria-labelledby="h-labels">
@@ -240,7 +263,7 @@
       <h2 id="h-rotate">Rotation</h2>
       <div class="card">
         <div class="block">
-          <div class="label" id="rotateLabel">Cycle through these styles <span class="hint">(none ticked = rotation off)</span></div>
+          <div class="label" id="rotateLabel">Cycle through these styles <span class="hint">(none ticked = rotation off)</span> <span class="webonly" title="Saved, but the Mac app doesn't rotate styles yet">web only</span></div>
           <div class="check-grid" id="rotateThemes" role="group" aria-labelledby="rotateLabel"></div>
         </div>
         <div data-fields="rotation"></div>
@@ -277,6 +300,10 @@
 
 <script>
 'use strict';
+// Uncaught errors go to the app's stderr (there is no web inspector in release builds).
+const vwLog = msg => { try { window.ipc.postMessage(String(msg)); } catch (e) { /* no native host */ } };
+window.addEventListener('error', e => vwLog('error: ' + e.message + ' at ' + e.lineno));
+window.addEventListener('unhandledrejection', e => vwLog('unhandled: ' + (e.reason && e.reason.message || e.reason)));
 // Native: everything is answered by the app over its custom scheme.
 const API = 'vw://app';
 let cfg = {};          // last good config from the server
@@ -313,15 +340,15 @@ const GROUPS = {
     { k: 'palette', t: 'select', label: 'Palette', hint: 'Colours assigned to tags/folders', opts: opts(['auto', 'aurora', 'riso', 'metro', 'pastel', 'earth', 'neon', 'viridis', 'mono']) },
     { k: 'nodeColorMode', t: 'select', label: 'Colour nodes by', hint: 'Age: fresh = green, 1+ year = red', opts: [['tag', 'Tag'], ['age', 'Age'], ['folder', 'Folder'], ['recency', 'Recency']] },
     { k: 'recencyDays', t: 'int', label: 'Recency window (days)', hint: 'Notes older than this are dimmed', min: 1, max: 365, dep: c => c.nodeColorMode === 'recency', hard: true },
-    { k: 'autoTheme', t: 'toggle', label: 'Auto light/dark', hint: 'Use the light colours when the OS is in light mode' },
-    { k: 'timeOfDay', t: 'select', label: 'Time of day', hint: 'Tint: shift toward night/dawn/dusk by clock. Palette: light colours 07–19.', opts: [['off', 'Off'], ['tint', 'Tint'], ['palette', 'Palette']] },
-    { k: 'lightAccent', t: 'color', label: 'Light accent', dep: c => c.autoTheme || c.timeOfDay === 'palette' },
-    { k: 'lightBackground', t: 'color', label: 'Light background', dep: c => c.autoTheme || c.timeOfDay === 'palette' }
+    { k: 'autoTheme', web: true, t: 'toggle', label: 'Auto light/dark', hint: 'Use the light colours when the OS is in light mode' },
+    { k: 'timeOfDay', web: true, t: 'select', label: 'Time of day', hint: 'Tint: shift toward night/dawn/dusk by clock. Palette: light colours 07–19.', opts: [['off', 'Off'], ['tint', 'Tint'], ['palette', 'Palette']] },
+    { k: 'lightAccent', web: true, t: 'color', label: 'Light accent', dep: c => c.autoTheme || c.timeOfDay === 'palette' },
+    { k: 'lightBackground', web: true, t: 'color', label: 'Light background', dep: c => c.autoTheme || c.timeOfDay === 'palette' }
   ],
   nodes: [
     { k: 'nodeGlow', t: 'toggle', label: 'Node glow', hint: 'Radial halo around each node' },
     { k: 'glowIntensity', t: 'range', label: 'Glow intensity', min: 0, max: 1, step: 0.01, dep: c => c.nodeGlow },
-    { k: 'tagShapes', t: 'toggle', label: 'Tag shapes', hint: 'Circle / square / triangle / diamond per tag' },
+    { k: 'tagShapes', web: true, t: 'toggle', label: 'Tag shapes', hint: 'Circle / square / triangle / diamond per tag' },
     { k: 'edgeStyle', t: 'select', label: 'Edge style', opts: opts(['line', 'curve', 'none']) },
     { k: 'edgeColoring', t: 'toggle', label: 'Edge colouring', hint: "Edges inherit their source node's colour", dep: c => c.edgeStyle !== 'none' },
     { k: 'linkOpacity', t: 'range', label: 'Link opacity', min: 0, max: 1, step: 0.01, dep: c => c.edgeStyle !== 'none' },
@@ -329,24 +356,24 @@ const GROUPS = {
     { k: 'clusterHalos', t: 'toggle', label: 'Cluster halos', hint: 'Soft colour clouds behind tag groups' }
   ],
   motion: [
-    { k: 'motionMode', t: 'select', label: 'Motion mode', hint: 'Ambient movement intensity', opts: opts(['still', 'light', 'balanced', 'showcase']) },
-    { k: 'particles', t: 'toggle', label: 'Edge particles', hint: 'Dots flowing along edges' },
-    { k: 'particleSpeed', t: 'range', label: 'Particle speed', min: 0.1, max: 3, step: 0.1, dep: c => c.particles },
-    { k: 'particleDensity', t: 'range', label: 'Particle density', min: 0.05, max: 1, step: 0.01, dep: c => c.particles },
-    { k: 'ambientParticles', t: 'toggle', label: 'Ambient particles', hint: 'Floating dust in the background' },
-    { k: 'ambientParticleCount', t: 'range', label: 'Ambient count', min: 0, max: 300, step: 1, dep: c => c.ambientParticles },
-    { k: 'ambientParticleSpeed', t: 'range', label: 'Ambient speed', min: 0.05, max: 2, step: 0.05, dep: c => c.ambientParticles },
-    { k: 'ambientParticleSize', t: 'range', label: 'Ambient size', min: 0.5, max: 4, step: 0.1, dep: c => c.ambientParticles },
-    { k: 'glowBreathing', t: 'toggle', label: 'Glow breathing', hint: 'Glow slowly pulses' },
+    { k: 'motionMode', t: 'select', label: 'Motion mode', hint: 'Still draws nothing until something changes', opts: [['still', 'Still (default)'], ['light', 'Light'], ['balanced', 'Balanced'], ['showcase', 'Showcase']] },
+    { k: 'particles', web: true, t: 'toggle', label: 'Edge particles', hint: 'Dots flowing along edges' },
+    { k: 'particleSpeed', web: true, t: 'range', label: 'Particle speed', min: 0.1, max: 3, step: 0.1, dep: c => c.particles },
+    { k: 'particleDensity', web: true, t: 'range', label: 'Particle density', min: 0.05, max: 1, step: 0.01, dep: c => c.particles },
+    { k: 'ambientParticles', web: true, t: 'toggle', label: 'Ambient particles', hint: 'Floating dust in the background' },
+    { k: 'ambientParticleCount', web: true, t: 'range', label: 'Ambient count', min: 0, max: 300, step: 1, dep: c => c.ambientParticles },
+    { k: 'ambientParticleSpeed', web: true, t: 'range', label: 'Ambient speed', min: 0.05, max: 2, step: 0.05, dep: c => c.ambientParticles },
+    { k: 'ambientParticleSize', web: true, t: 'range', label: 'Ambient size', min: 0.5, max: 4, step: 0.1, dep: c => c.ambientParticles },
+    { k: 'glowBreathing', t: 'toggle', label: 'Glow breathing', hint: 'Breathing Glow only, and only with motion on. Night Sky and Aurora Lite always breathe when motion is on.' },
     { k: 'glowBreathingSpeed', t: 'range', label: 'Breathing speed', min: 0.1, max: 3, step: 0.1, dep: c => c.glowBreathing },
     { k: 'glowBreathingDepth', t: 'range', label: 'Breathing depth', min: 0, max: 0.4, step: 0.01, dep: c => c.glowBreathing },
     { k: 'chromaticBloom', t: 'toggle', label: 'Chromatic bloom', hint: 'Colour-fringed glow on bright nodes' },
     { k: 'chromaticBloomIntensity', t: 'range', label: 'Bloom intensity', min: 0, max: 1, step: 0.01, dep: c => c.chromaticBloom },
-    { k: 'depthParallax', t: 'toggle', label: 'Depth parallax', hint: 'Layers drift at different speeds' },
-    { k: 'depthParallaxStrength', t: 'range', label: 'Parallax strength', min: 0, max: 1, step: 0.01, dep: c => c.depthParallax },
-    { k: 'depthParallaxLayers', t: 'range', label: 'Parallax layers', min: 2, max: 4, step: 1, dep: c => c.depthParallax },
+    { k: 'depthParallax', web: true, t: 'toggle', label: 'Depth parallax', hint: 'Layers drift at different speeds' },
+    { k: 'depthParallaxStrength', web: true, t: 'range', label: 'Parallax strength', min: 0, max: 1, step: 0.01, dep: c => c.depthParallax },
+    { k: 'depthParallaxLayers', web: true, t: 'range', label: 'Parallax layers', min: 2, max: 4, step: 1, dep: c => c.depthParallax },
     { k: 'depthOfField', t: 'toggle', label: 'Depth of field', hint: 'Peripheral nodes dimmer and smaller' },
-    { k: 'noteFlare', t: 'toggle', label: 'New note flare', hint: 'Flash when a new note appears' },
+    { k: 'noteFlare', web: true, t: 'toggle', label: 'New note flare', hint: 'Flash when a new note appears' },
     { k: 'backgroundGradient', t: 'toggle', label: 'Background gradient', hint: 'Subtle radial gradient with accent tint' },
     { k: 'grain', t: 'toggle', label: 'Film grain' },
     { k: 'vignette', t: 'toggle', label: 'Vignette', hint: 'Darken the screen edges' }
@@ -363,26 +390,26 @@ const GROUPS = {
     { k: 'labelStyle.chromaticSplit', t: 'toggle', label: 'Chromatic split labels', hint: 'RGB-offset text effect', dep: c => c.hubLabels }
   ],
   overlay: [
-    { k: 'overlay', t: 'select', label: 'Overlay', hint: 'Note: shows a different note each hour', opts: [['none', 'None'], ['clock', 'Clock'], ['stats', 'Vault stats'], ['note', 'Note of the hour']] },
+    { k: 'overlay', web: true, t: 'select', label: 'Overlay', hint: 'Note: shows a different note each hour', opts: [['none', 'None'], ['clock', 'Clock'], ['stats', 'Vault stats'], ['note', 'Note of the hour']] },
     { k: 'focusNote', t: 'text', label: 'Focus note', hint: 'Highlight a note and its neighbours. Empty = off.', placeholder: 'today, or a note name', maxlength: 300 },
     { k: 'focusHops', t: 'range', label: 'Focus distance (hops)', min: 1, max: 4, step: 1, dep: c => !!c.focusNote }
   ],
   rotation: [
-    { k: 'rotate.everyMinutes', t: 'int', label: 'Switch every (minutes)', min: 1, max: 1440, dep: c => !!(c.rotate && c.rotate.themes && c.rotate.themes.length) }
+    { k: 'rotate.everyMinutes', web: true, t: 'int', label: 'Switch every (minutes)', min: 1, max: 1440, dep: c => !!(c.rotate && c.rotate.themes && c.rotate.themes.length) }
   ],
   vault: [
     { k: 'showUnresolvedLinks', t: 'toggle', label: 'Unresolved links', hint: "Ghost nodes for [[links]] to notes that don't exist yet" }
   ],
   performance: [
-    { k: 'renderer', t: 'select', label: 'Renderer', hint: 'Auto picks WebGL when available', opts: [['auto', 'Auto'], ['canvas', 'Canvas 2D'], ['webgl', 'WebGL']] },
+    { k: 'renderer', web: true, t: 'select', label: 'Renderer', hint: 'Auto picks WebGL when available', opts: [['auto', 'Auto'], ['canvas', 'Canvas 2D'], ['webgl', 'WebGL']] },
     { k: 'maxFps', t: 'range', label: 'Max FPS', min: 0, max: 60, step: 1, fmt: v => v === 0 ? 'only on change' : String(v) },
-    { k: 'idleFps', t: 'range', label: 'Idle FPS', hint: 'Frame rate when nothing is happening', min: 0, max: 30, step: 1, fmt: v => v === 0 ? 'hold frame' : String(v) },
+    { k: 'idleFps', web: true, t: 'range', label: 'Idle FPS', hint: 'Frame rate when nothing is happening', min: 0, max: 30, step: 1, fmt: v => v === 0 ? 'hold frame' : String(v) },
     { k: 'autoScaleLargeVaults', t: 'toggle', label: 'Auto-scale large vaults', hint: 'Reduce particles, labels and edge density on dense graphs' },
-    { k: 'maxRenderedNodes', t: 'int', label: 'Max rendered nodes', hint: 'Excess hidden by lowest importance (lower = faster)', min: 100, max: 100000, step: 100 },
-    { k: 'fastHash', t: 'toggle', label: 'Fast change detection', hint: 'Hash file metadata instead of contents' }
+    { k: 'maxRenderedNodes', web: true, t: 'int', label: 'Max rendered nodes', hint: 'Excess hidden by lowest importance (lower = faster)', min: 100, max: 100000, step: 100 },
+    { k: 'fastHash', web: true, t: 'toggle', label: 'Fast change detection', hint: 'Hash file metadata instead of contents' }
   ],
   advanced: [
-    { k: 'refreshMs', t: 'int', label: 'Refresh interval (ms)', hint: 'Polling fallback; only matters when live updates (SSE) are unavailable', min: 1000, max: 60000, step: 1000 }
+    { k: 'refreshMs', web: true, t: 'int', label: 'Refresh interval (ms)', hint: 'Polling fallback; only matters when live updates (SSE) are unavailable', min: 1000, max: 60000, step: 1000 }
   ]
 };
 const FIELDS = [].concat(...Object.values(GROUPS));
@@ -443,7 +470,8 @@ function rowHtml(f) {
         `<input type="color" id="${id}-hex" aria-label="Custom label glow colour">`;
       break;
   }
-  return `<div class="row" id="${id}-row"><div class="row-text"><label for="${id}">${escapeHtml(f.label)}</label>${hint}</div><div class="controls">${ctl}</div></div>`;
+  const web = f.web ? ' <span class="webonly" title="Kept for the web version; the Mac app doesn\'t use it yet">web only</span>' : '';
+  return `<div class="row" id="${id}-row"><div class="row-text"><label for="${id}">${escapeHtml(f.label)}${web}</label>${hint}</div><div class="controls">${ctl}</div></div>`;
 }
 
 function buildFields() {
@@ -527,10 +555,7 @@ function applyForm(force, revertKeys) {
   // Ignore paths
   const ip = $('ignorePaths');
   if (ip !== active || mustRevert('ignorePaths')) ip.value = (cfg.ignorePaths || []).join('\n');
-  // Rotation themes
-  const rot = (cfg.rotate && cfg.rotate.themes) || [];
-  document.querySelectorAll('#rotateThemes input').forEach(cb => { cb.checked = rot.includes(cb.value); });
-  renderThemeSelection();
+  renderThemeSelection(); // also the rotation checkboxes
   updateContrast();
   detectActivePreset();
   renderTags();
@@ -596,22 +621,48 @@ async function loadConfig() {
 }
 
 // ---------- styles (themes) ----------
+// Native styles are shown with previews. The web version's styles only render the
+// default look in the Mac app, so they're hidden unless the config names one (an
+// imported web config): then that one is shown, marked, so the selection is visible.
+let themeSig = null;
+function shownThemes() {
+  const cur = cfg.theme || 'default';
+  const rot = (cfg.rotate && cfg.rotate.themes) || [];
+  return {
+    tiles: THEMES.filter(t => t.native || t.id === cur),
+    rotation: THEMES.filter(t => t.native || rot.includes(t.id))
+  };
+}
+function themeTile(t) {
+  const name = escapeHtml(t.name || t.id);
+  const badge = t.native ? (t.dark === false ? 'light' : 'dark') : 'web';
+  const desc = t.native ? t.description : 'A web version style. The Mac app shows Breathing Glow for it.';
+  const text = `<span class="name">${name}<span class="badge">${badge}</span></span>${desc ? `<span class="desc">${escapeHtml(desc)}</span>` : ''}`;
+  if (!t.native) return `<button type="button" class="theme-tile" data-theme="${escapeHtml(t.id)}" aria-pressed="false">${text}</button>`;
+  const preview = t.preview
+    ? `<span class="preview" style="background-image:url('${escapeHtml(encodeURI(t.preview))}')" aria-hidden="true"></span>`
+    : '<span class="preview none" aria-hidden="true">No preview yet</span>';
+  return `<button type="button" class="theme-tile has-preview" data-theme="${escapeHtml(t.id)}" aria-pressed="false">${preview}<span class="tile-text">${text}</span></button>`;
+}
 function renderThemes() {
+  const { tiles, rotation } = shownThemes();
+  const sig = JSON.stringify([tiles.map(t => t.id), rotation.map(t => t.id)]);
+  if (sig === themeSig) return;
+  themeSig = sig;
   const grid = $('themeGrid');
-  if (!THEMES.length) { grid.innerHTML = '<div class="empty">No styles available.</div>'; }
-  else {
-    grid.innerHTML = THEMES.map(t => `<button type="button" class="theme-tile" data-theme="${escapeHtml(t.id)}" aria-pressed="false">
-      <span class="name">${escapeHtml(t.name || t.id)}<span class="badge">${t.dark === false ? 'light' : 'dark'}</span></span>
-      ${t.description ? `<span class="desc">${escapeHtml(t.description)}</span>` : ''}
-    </button>`).join('');
-  }
-  $('rotateThemes').innerHTML = THEMES.map(t => {
+  const focused = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.theme : undefined;
+  grid.innerHTML = tiles.length ? tiles.map(themeTile).join('') : '<div class="empty">No styles available.</div>';
+  if (focused) { const b = grid.querySelector(`.theme-tile[data-theme="${CSS.escape(focused)}"]`); if (b) b.focus(); }
+  $('rotateThemes').innerHTML = rotation.map(t => {
     const id = 'rot-' + String(t.id).replace(/[^a-zA-Z0-9_-]/g, '_');
-    return `<label for="${id}"><input type="checkbox" id="${id}" value="${escapeHtml(t.id)}">${escapeHtml(t.name || t.id)}</label>`;
+    const label = escapeHtml(t.name || t.id) + (t.native ? '' : ' <span class="webonly">web</span>');
+    return `<label for="${id}"><input type="checkbox" id="${id}" value="${escapeHtml(t.id)}">${label}</label>`;
   }).join('') || '<div class="empty">No styles available.</div>';
-  applyForm();
 }
 function renderThemeSelection() {
+  renderThemes();
+  const rot = (cfg.rotate && cfg.rotate.themes) || [];
+  document.querySelectorAll('#rotateThemes input').forEach(cb => { cb.checked = rot.includes(cb.value); });
   document.querySelectorAll('.theme-tile').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.theme === (cfg.theme || 'default'))));
 }
 $('themeGrid').addEventListener('click', e => {
@@ -625,7 +676,8 @@ $('rotateThemes').addEventListener('change', () => {
 });
 async function loadThemes() {
   try { THEMES = await getJson('/api/themes'); } catch (e) { THEMES = []; status('Failed to load styles', 'err'); }
-  renderThemes();
+  themeSig = null;
+  renderThemeSelection();
 }
 
 // ---------- presets ----------

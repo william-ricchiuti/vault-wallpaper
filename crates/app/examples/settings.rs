@@ -8,6 +8,14 @@
 //!
 //! `VW_SETTINGS_SCRIPT=<file.js>` runs that script in the page three seconds after it
 //! opens (for scripted checks: click a tile, apply a preset, read the status line).
+//! The page's `window.ipc.postMessage(text)` prints to stderr, so a script can report.
+//! Two ready-made checks (run each against a fresh config; they change it):
+//!
+//!   VW_SETTINGS_SCRIPT=crates/app/examples/settings-checks/controls.js cargo run -p vault-wallpaper --example settings
+//!   VW_SETTINGS_SCRIPT=crates/app/examples/settings-checks/themes.js cargo run -p vault-wallpaper --example settings
+//!
+//! `controls.js` drives every control type and prints what reached the file; note that its
+//! Copy JSON step replaces the clipboard.
 
 #[allow(dead_code)]
 #[path = "../src/settings/mod.rs"]

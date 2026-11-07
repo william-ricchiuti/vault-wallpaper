@@ -8,10 +8,11 @@
 //! |---|---|
 //! | `GET /`, `/settings.html` | the page |
 //! | `GET /presets.json`, `/presets/<id>.jpg` | built-in presets and their thumbnails |
+//! | `GET /themes/<id>.jpg` | native theme previews |
 //! | `GET /api/config` | the config on disk, minus `vaultPath` |
 //! | `POST /api/config` | validate a patch (all or nothing), save atomically, return the new config |
-//! | `GET /api/defaults` | the default config |
-//! | `GET /api/themes` | `[{ id, name, description, dark }]` for each of [`config::THEMES`] |
+//! | `GET /api/defaults` | the default config, with motion off (as for a new install) |
+//! | `GET /api/themes` | `[{ id, name, description, dark, native?, preview? }]` for each of [`config::THEMES`], native themes first |
 //! | `GET /api/tags` | `{ tag: noteCount }`, supplied by the app ([`Backend::tags`]) |
 //! | `GET/POST/DELETE /api/custom-presets` | the `custom-presets.json` sidecar |
 //!
@@ -76,6 +77,17 @@ const THUMBNAILS: &[(&str, &[u8])] = thumbnails!(
     "wash",
 );
 
+/// Native theme previews, 640x416 JPEG: the real-vault renders from
+/// `cargo run --release -p vw-render --example render_vault -- <vault> out.png --theme <id> --size 1512 982 1`,
+/// downscaled with `sips -Z 640 -s format jpeg -s formatOptions 78`. A theme listed in
+/// `themes.json` without an image here (Pulse, until it has one) gets no `preview`.
+const THEME_PREVIEWS: &[(&str, &[u8])] = &[
+    ("default", include_bytes!("../../assets/themes/default.jpg")),
+    ("night-sky", include_bytes!("../../assets/themes/night-sky.jpg")),
+    ("aurora-lite", include_bytes!("../../assets/themes/aurora-lite.jpg")),
+    ("ink-paper", include_bytes!("../../assets/themes/ink-paper.jpg")),
+];
+
 /// What the handler reads and writes. Shared between the web view's protocol handler and
 /// [`SettingsWindow`](super::SettingsWindow).
 pub struct Backend {
@@ -122,20 +134,20 @@ impl Backend {
                 Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
             },
             (&Method::POST, "/api/config") => self.post_config(req),
-            (&Method::GET, "/api/defaults") => ok_json(&safe_config(&Config::default())),
+            (&Method::GET, "/api/defaults") => ok_json(&safe_config(&defaults())),
             (&Method::GET, "/api/themes") => ok_json(&themes()),
             (&Method::GET, "/api/tags") => ok_json(&self.tags_json()),
             (_, "/api/custom-presets") => self.custom_presets(req),
-            (&Method::GET, p) => match p
-                .strip_prefix("/presets/")
-                .and_then(|f| f.strip_suffix(".jpg"))
-            {
-                Some(id) => match THUMBNAILS.iter().find(|(n, _)| *n == id) {
-                    Some((_, bytes)) => asset("image/jpeg", bytes),
+            (&Method::GET, p) => {
+                let image = |dir: &str, list: &[(&str, &'static [u8])]| {
+                    let id = p.strip_prefix(dir)?.strip_suffix(".jpg")?;
+                    list.iter().find(|(n, _)| *n == id).map(|(_, b)| *b)
+                };
+                match image("/presets/", THUMBNAILS).or_else(|| image("/themes/", THEME_PREVIEWS)) {
+                    Some(bytes) => asset("image/jpeg", bytes),
                     None => not_found(),
-                },
-                None => not_found(),
-            },
+                }
+            }
             _ => not_found(),
         }
     }
@@ -263,20 +275,40 @@ fn safe_config(cfg: &Config) -> Value {
     v
 }
 
-/// The web version's theme list (names and descriptions from its `themes/*.js` headers),
-/// limited to the ids the native config accepts.
+/// The default config for "Reset to defaults": `parser.js`'s `DEFAULTS`, except that
+/// motion starts off, as it does for a new install (lightness first).
+fn defaults() -> Config {
+    Config {
+        motion_mode: config::MotionMode::Still,
+        ..Config::default()
+    }
+}
+
+/// The theme list in `themes.json` order (native themes first, then the web version's,
+/// whose names and descriptions come from its `themes/*.js` headers), limited to the ids
+/// the native config accepts. Any accepted id missing from the file is appended bare.
+/// The page shows the native ones; web ids only render the default look natively.
 fn themes() -> Value {
     let all: Vec<Value> = serde_json::from_str(THEMES_JSON).unwrap_or_default();
-    let mut out: Vec<Value> = config::THEMES
-        .iter()
-        .map(|id| {
-            all.iter()
-                .find(|t| t.get("id").and_then(Value::as_str) == Some(id))
-                .cloned()
-                .unwrap_or_else(|| json!({ "id": id, "name": id, "description": "", "dark": true }))
+    let id_of = |t: &Value| t.get("id").and_then(Value::as_str).map(str::to_owned);
+    let mut out: Vec<Value> = all
+        .into_iter()
+        .filter(|t| id_of(t).is_some_and(|id| config::THEMES.contains(&id.as_str())))
+        .map(|mut t| {
+            let id = id_of(&t).unwrap_or_default();
+            if let Some(o) = t.as_object_mut()
+                && !THEME_PREVIEWS.iter().any(|(n, _)| *n == id)
+            {
+                o.remove("preview");
+            }
+            t
         })
         .collect();
-    out.dedup();
+    for id in config::THEMES {
+        if !out.iter().any(|t| id_of(t).as_deref() == Some(id)) {
+            out.push(json!({ "id": id, "name": id, "description": "", "dark": true }));
+        }
+    }
     Value::Array(out)
 }
 
@@ -525,6 +557,7 @@ mod tests {
     fn defaults_reset_is_accepted() {
         let b = temp_backend("defaults");
         let defaults = body(&b.handle(&req("GET", "vw://app/api/defaults", None)));
+        assert_eq!(defaults["motionMode"], "still", "reset keeps motion off");
         assert_eq!(
             b.handle(&req("POST", "vw://app/api/config", Some(defaults)))
                 .status(),
@@ -577,14 +610,37 @@ mod tests {
     #[test]
     fn themes_cover_the_config_ids() {
         let t = themes();
-        let ids: Vec<&str> = t
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|t| t["id"].as_str().unwrap())
-            .collect();
-        assert_eq!(ids, config::THEMES);
-        assert!(t[0]["name"].as_str().is_some());
+        let list = t.as_array().unwrap();
+        let mut ids: Vec<&str> = list.iter().map(|t| t["id"].as_str().unwrap()).collect();
+        // Native first, the default look leading.
+        assert_eq!(&ids[..5], ["default", "night-sky", "pulse", "aurora-lite", "ink-paper"]);
+        assert!(list[..5].iter().all(|t| t["native"] == true));
+        assert!(list[5..].iter().all(|t| t.get("native").is_none()));
+        assert!(list.iter().all(|t| t["description"].as_str().is_some_and(|d| !d.is_empty())));
+        ids.sort_unstable();
+        let mut want = config::THEMES.to_vec();
+        want.sort_unstable();
+        assert_eq!(ids, want);
+    }
+
+    #[test]
+    fn theme_previews_are_served() {
+        let b = temp_backend("previews");
+        for t in themes().as_array().unwrap() {
+            match t["preview"].as_str() {
+                Some(p) => {
+                    let r = b.handle(&req("GET", &format!("vw://app{p}"), None));
+                    assert_eq!(r.status(), 200, "{p}");
+                    assert_eq!(&r.body()[..2], [0xff, 0xd8], "{p} is a JPEG");
+                }
+                // Only a native theme still waiting for its render may lack one.
+                None => assert!(t.get("native").is_none() || t["id"] == "pulse", "{}", t["id"]),
+            }
+        }
+        assert_eq!(
+            b.handle(&req("GET", "vw://app/themes/nope.jpg", None)).status(),
+            404
+        );
     }
 
     #[test]

@@ -1,9 +1,43 @@
 [
   {
     "id": "default",
-    "name": "Default",
-    "description": "The classic glowing graph. Presets tune it.",
-    "dark": true
+    "name": "Breathing Glow",
+    "native": true,
+    "preview": "/themes/default.jpg",
+    "dark": true,
+    "description": "The classic glowing graph; the presets below tune it. Its glow can breathe when Glow breathing is on."
+  },
+  {
+    "id": "night-sky",
+    "name": "Night Sky",
+    "native": true,
+    "preview": "/themes/night-sky.jpg",
+    "dark": true,
+    "description": "Notes as stars and tags as constellations. With motion on, the starlight twinkles slowly."
+  },
+  {
+    "id": "pulse",
+    "name": "Pulse",
+    "native": true,
+    "preview": "/themes/pulse.jpg",
+    "dark": true,
+    "description": "A still graph. With motion on, saving a note sends light along its links, then it settles."
+  },
+  {
+    "id": "aurora-lite",
+    "name": "Aurora Lite",
+    "native": true,
+    "preview": "/themes/aurora-lite.jpg",
+    "dark": true,
+    "description": "Soft curtains of colour rise over your biggest tag clusters. With motion on, they breathe slowly."
+  },
+  {
+    "id": "ink-paper",
+    "name": "Ink & Paper",
+    "native": true,
+    "preview": "/themes/ink-paper.jpg",
+    "dark": false,
+    "description": "A printed plate: ink on warm paper, fully still. With motion on, saving a note bleeds ink for two seconds."
   },
   {
     "id": "aurora",
