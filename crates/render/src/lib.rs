@@ -54,6 +54,20 @@ pub struct NodeInstance {
     pub color: [f32; 4],
 }
 
+/// One aurora curtain (Aurora Lite), drawn into the low-resolution glow layer.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct CurtainInstance {
+    /// Centre of the curtain's base line, in screen points.
+    pub base: [f32; 2],
+    /// Half width and height, in points.
+    pub size: [f32; 2],
+    /// Colour at the base and overall strength.
+    pub color: [f32; 4],
+    /// Colour at the top; alpha carries the shape seed.
+    pub top: [f32; 4],
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Uniforms {
@@ -177,6 +191,7 @@ struct Pipelines {
     nodes: wgpu::RenderPipeline,
     stars: wgpu::RenderPipeline,
     glow: wgpu::RenderPipeline,
+    curtains: wgpu::RenderPipeline,
     blur: wgpu::RenderPipeline,
     composite: wgpu::RenderPipeline,
     glow_overlay: wgpu::RenderPipeline,
@@ -237,6 +252,11 @@ impl Pipelines {
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32, 2 => Float32x4],
         };
+        let curtain_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<CurtainInstance>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32x4],
+        };
         let alpha = Some(wgpu::BlendState::ALPHA_BLENDING);
         let additive = Some(wgpu::BlendState {
             color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
@@ -250,6 +270,7 @@ impl Pipelines {
             nodes: make(&scene_mod, &scene_layout, "node_vs", "node_fs", std::slice::from_ref(&node), SCENE_FORMAT, alpha),
             stars: make(&scene_mod, &scene_layout, "node_vs", "star_fs", std::slice::from_ref(&node), SCENE_FORMAT, alpha),
             glow: make(&scene_mod, &scene_layout, "node_vs", "glow_fs", std::slice::from_ref(&node), GLOW_FORMAT, additive),
+            curtains: make(&scene_mod, &scene_layout, "curtain_vs", "curtain_fs", &[Some(curtain_layout)], GLOW_FORMAT, additive),
             blur: make(&post_mod, &blur_layout, "full_vs", "blur_fs", &[], GLOW_FORMAT, None),
             composite: make(&post_mod, &composite_layout, "full_vs", "composite_fs", &[], out_format, None),
             glow_overlay: make(&post_mod, &composite_layout, "full_vs", "glow_overlay_fs", &[], out_format, None),
@@ -306,6 +327,7 @@ pub struct WallpaperRenderer {
     node_buf: Option<wgpu::Buffer>,
     star_buf: Option<wgpu::Buffer>,
     glow_buf: Option<wgpu::Buffer>,
+    curtain_buf: Option<wgpu::Buffer>,
     has_glow: bool,
 }
 
@@ -348,6 +370,7 @@ impl WallpaperRenderer {
             node_buf: None,
             star_buf: None,
             glow_buf: None,
+            curtain_buf: None,
             has_glow: false,
         }
     }
@@ -412,7 +435,8 @@ impl WallpaperRenderer {
         let nodes = instance_buffer(gpu, &mut self.node_buf, &data.nodes, "nodes");
         let stars = instance_buffer(gpu, &mut self.star_buf, &data.stars, "stars");
         let glows = instance_buffer(gpu, &mut self.glow_buf, &data.glow, "glow");
-        self.has_glow = glows > 0 && style.glow > 0.0;
+        let curtains = instance_buffer(gpu, &mut self.curtain_buf, &data.curtains, "curtains");
+        self.has_glow = glows + curtains > 0 && style.glow > 0.0;
         self.text.prepare(gpu, &data.text, size, scale);
 
         let points = [size[0] as f32 / scale, size[1] as f32 / scale];
@@ -448,6 +472,7 @@ impl WallpaperRenderer {
             {
                 let mut pass = begin(&mut enc, &glow_a, "glow");
                 pass.set_bind_group(0, &self.glow_bind, &[]);
+                draw_instances(&mut pass, &p.curtains, &self.curtain_buf, curtains);
                 draw_instances(&mut pass, &p.glow, &self.glow_buf, glows);
             }
             for (target, bind) in [(&glow_b, &t.blur_h), (&glow_a, &t.blur_v)] {

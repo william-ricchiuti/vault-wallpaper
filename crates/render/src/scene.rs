@@ -6,7 +6,7 @@ use vw_core::layout::LayoutGraph;
 
 use crate::look::Look;
 use crate::text::{Anchor, FontFamily, TextItem, TextStyle};
-use crate::{EdgeInstance, Framing, NodeInstance};
+use crate::{CurtainInstance, EdgeInstance, Framing, NodeInstance};
 
 /// What the background shader draws under the gradient.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -187,6 +187,8 @@ pub struct SceneData {
     pub glow: Vec<NodeInstance>,
     /// Discs drawn with diffraction spikes (Night Sky hubs).
     pub stars: Vec<NodeInstance>,
+    /// Aurora curtains, drawn into the glow layer (Aurora Lite).
+    pub curtains: Vec<CurtainInstance>,
     pub text: Vec<TextItem>,
 }
 

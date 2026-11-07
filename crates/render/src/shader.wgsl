@@ -169,3 +169,76 @@ fn soft(in: NodeOut) -> f32 {
   let a = clamp((core + spikes * 0.6) * in.color.a, 0.0, 1.0);
   return vec4<f32>(in.color.rgb, a);
 }
+
+// ---- aurora curtains (Aurora Lite): drawn into the low-resolution glow layer ----
+// A curtain is a wavy, folded base line with vertical rays rising from it, bright at
+// the base and fading upward, coloured from `color` (base) to `top`. Drawn once per
+// scene change; the blur and the window server's breathing do the rest.
+struct Curtain {
+  @location(0) base: vec2<f32>,   // centre of the base line, in points
+  @location(1) size: vec2<f32>,   // half width, height (points)
+  @location(2) color: vec4<f32>,  // base colour, strength
+  @location(3) top: vec4<f32>,    // colour at the top, seed
+};
+struct CurtainOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) local: vec2<f32>,  // offset from the base centre, in points (y down)
+  @location(1) size: vec2<f32>,
+  @location(2) color: vec4<f32>,
+  @location(3) top: vec4<f32>,
+};
+
+fn hash1(x: f32) -> f32 {
+  return fract(sin(x * 127.1) * 43758.5453);
+}
+
+fn vnoise(x: f32) -> f32 {
+  let i = floor(x);
+  let f = fract(x);
+  return mix(hash1(i), hash1(i + 1.0), f * f * (3.0 - 2.0 * f));
+}
+
+@vertex fn curtain_vs(@builtin(vertex_index) v: u32, c: Curtain) -> CurtainOut {
+  let corners = array<vec2<f32>, 6>(vec2(-1., 0.), vec2(1., 0.), vec2(-1., 1.), vec2(-1., 1.), vec2(1., 0.), vec2(1., 1.));
+  let k = corners[v];
+  let fold = c.size.y * 0.2;
+  // From above the tallest ray down to below the lowest fold plus the soft lower edge.
+  let y0 = -(c.size.y * 1.05 + fold);
+  let y1 = fold + 10.0 + c.size.y * 0.06;
+  let off = vec2<f32>(k.x * c.size.x, mix(y0, y1, k.y));
+  var o: CurtainOut;
+  o.pos = to_clip(c.base + off);
+  o.local = off;
+  o.size = c.size;
+  o.color = c.color;
+  o.top = c.top;
+  return o;
+}
+
+@fragment fn curtain_fs(in: CurtainOut) -> @location(0) vec4<f32> {
+  let hw = max(in.size.x, 1.0);
+  let height = max(in.size.y, 1.0);
+  let seed = in.top.a;
+  let x = in.local.x;
+  let s = x / hw;
+  // Ends taper in strength and height.
+  let env = smoothstep(1.0, 0.35, abs(s));
+  // Folds: the base line wanders up and down across the curtain.
+  let fold = (sin(s * 3.4 + seed) * 0.55 + sin(s * 7.3 + seed * 2.3) * 0.3 + sin(s * 13.0 + seed * 0.7) * 0.15) * height * 0.2;
+  let h = fold - in.local.y;   // height above the base line
+  // Rays: vertical striations of varying brightness and height.
+  let r = vnoise(x / 11.0 + seed * 7.0) * 0.5 + vnoise(x / 29.0 + seed * 3.0) * 0.5;
+  let rays = 0.15 + 0.85 * r * r * 1.6;
+  let reach = height * (0.45 + 0.55 * vnoise(x / 70.0 + seed * 5.0)) * (0.45 + 0.55 * env);
+  var profile: f32;
+  if (h < 0.0) {
+    let soft = 5.0 + height * 0.035;
+    profile = exp(-(h * h) / (soft * soft));
+  } else {
+    let hn = h / reach;
+    profile = (exp(-hn * 1.8) + exp(-h / (height * 0.035)) * 1.1) * (1.0 - smoothstep(0.55, 1.0, hn));
+  }
+  let rgb = mix(in.color.rgb, in.top.rgb, smoothstep(0.08, 0.65, max(h, 0.0) / height));
+  let a = clamp(in.color.a * env * rays * profile, 0.0, 1.0);
+  return vec4<f32>(rgb * a, a);
+}
