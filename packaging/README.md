@@ -28,7 +28,9 @@ bundle with its `Info.plist`:
 
 - `CFBundleIdentifier` `com.williamricchiuti.vaultwallpaper`
 - `CFBundleName` / `CFBundleDisplayName` "Vault Wallpaper"
-- `CFBundleShortVersionString` / `CFBundleVersion` from `crates/app/Cargo.toml`
+- `CFBundleShortVersionString`: the numeric part of the version in `crates/app/Cargo.toml`
+  (`1.0.0-beta.1` -> `1.0.0`); `CFBundleVersion`: a build number that only goes up
+  (`VW_BUILD_NUMBER`, else the commit count); `VWVersion`: the full version, used for the DMG name
 - `LSUIElement` true (no Dock icon), `LSMinimumSystemVersion` 13.0, `NSHighResolutionCapable` true
 
 The 13.0 floor comes from the plist alone. The script deliberately unsets
@@ -36,21 +38,27 @@ The 13.0 floor comes from the plist alone. The script deliberately unsets
 `--target` breaks proc-macro crates (`E0463 can't find crate for thiserror_impl`). Cargo does not
 rebuild when that variable changes, so if you hit E0463 after setting it, run `cargo clean`.
 
-It honours `CARGO_TARGET_DIR`. The icon is a placeholder drawn by `icon/make-icon-png.py`
-(standard-library Python) and committed as `icon/icon-1024.png`; the script turns it into
-`AppIcon.icns` with `sips` and `iconutil`. TODO: replace it with a designed icon.
+It honours `CARGO_TARGET_DIR`. The icon, `icon/icon-1024.png`, is drawn by code (the menu-bar
+glyph, lit, on a dark rounded square) and committed; the script turns it into `AppIcon.icns`
+with `sips` and `iconutil`. To redraw it:
+
+```bash
+cargo run --release -p vw-render --example app_icon -- packaging/icon/icon-1024.png
+```
+
+Everything the app needs at run time (the settings page, presets, thumbnails) is compiled
+into the binary, so the bundle has no other resources.
 
 Check the result:
 
 ```bash
 lipo -info "dist/Vault Wallpaper.app/Contents/MacOS/vault-wallpaper"
 plutil -lint "dist/Vault Wallpaper.app/Contents/Info.plist"
-open "dist/Vault Wallpaper.app" --args --vault ~/path/to/vault
-pkill -f "Vault Wallpaper"
+open "dist/Vault Wallpaper.app"
 ```
 
-The app has no menu bar or settings yet, so it needs `--vault` (or `VW_VAULT`) and has to be
-quit with `pkill` until the menu bar lands.
+To try a first run without touching your real settings, give it a scratch home folder:
+`open --env HOME=/tmp/vw-home "dist/Vault Wallpaper.app"`. Quit it from its menu-bar icon.
 
 ## 2. `sign.sh`
 
@@ -85,8 +93,14 @@ The team ID is the 10-character code at the end of your Developer ID identity. I
 submission comes back "Invalid", read Apple's reason with
 `xcrun notarytool log <submission-id> --keychain-profile vault-wallpaper-notary`.
 
+## Release
+
+The full release sequence (sign, notarize, staple, DMG, GitHub Release, Homebrew) is in
+[`docs/release-checklist.md`](../docs/release-checklist.md). The cask draft is
+[`homebrew/vault-wallpaper.rb`](homebrew/vault-wallpaper.rb).
+
 ## Not done yet
 
-- Real app icon.
-- Homebrew cask and GitHub Releases upload (Phase 7, later).
 - A release script that runs all four steps in one go.
+- `hdiutil create` prints a deprecation warning (it suggests `diskutil image create`); it still
+  works on this macOS.

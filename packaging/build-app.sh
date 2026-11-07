@@ -25,7 +25,13 @@ if [[ -z "$VERSION" ]]; then
   echo "error: could not read version from crates/app/Cargo.toml" >&2
   exit 1
 fi
-echo "==> $APP_NAME $VERSION ($BUNDLE_ID)"
+# Info.plist wants plain numbers: CFBundleShortVersionString is the semver core
+# ("1.0.0-beta.1" -> "1.0.0") and CFBundleVersion a build number that only goes up
+# (VW_BUILD_NUMBER, else the commit count). The full version goes in VWVersion, which
+# make-dmg.sh uses for the file name.
+SHORT_VERSION="${VERSION%%[-+]*}"
+BUILD_NUMBER="${VW_BUILD_NUMBER:-$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)}"
+echo "==> $APP_NAME $VERSION (short $SHORT_VERSION, build $BUILD_NUMBER, $BUNDLE_ID)"
 
 # Install missing rustup targets, and only those.
 INSTALLED="$(rustup target list --installed)"
@@ -56,7 +62,8 @@ echo "==> lipo -> universal binary"
 lipo -create "${SLICES[@]}" -output "$APP/Contents/MacOS/$BIN_NAME"
 lipo -info "$APP/Contents/MacOS/$BIN_NAME"
 
-# Icon: placeholder PNG -> .iconset -> .icns. TODO: replace the placeholder with a designed icon.
+# Icon: PNG -> .iconset -> .icns. The PNG is drawn by
+# `cargo run --release -p vw-render --example app_icon -- packaging/icon/icon-1024.png`.
 ICON_PNG="$ROOT/packaging/icon/icon-1024.png"
 ICON_KEY=""
 if [[ -f "$ICON_PNG" ]] && command -v iconutil >/dev/null && command -v sips >/dev/null; then
@@ -96,9 +103,13 @@ cat >"$APP/Contents/Info.plist" <<PLIST
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>$VERSION</string>
+	<string>$SHORT_VERSION</string>
 	<key>CFBundleVersion</key>
+	<string>$BUILD_NUMBER</string>
+	<key>VWVersion</key>
 	<string>$VERSION</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>© William Ricchiuti</string>
 $ICON_KEY
 	<key>LSMinimumSystemVersion</key>
 	<string>$MIN_MACOS</string>

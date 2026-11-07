@@ -15,7 +15,9 @@ if [[ ! -d "$APP" ]]; then
   exit 1
 fi
 
-VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+# VWVersion is the full version (e.g. 1.0.0-beta.1); older builds only had the short one.
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :VWVersion' "$APP/Contents/Info.plist" 2>/dev/null ||
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 DMG="$ROOT/dist/Vault-Wallpaper-$VERSION.dmg"
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/vw-dmg.XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT

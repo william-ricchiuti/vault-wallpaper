@@ -9,6 +9,7 @@ pub enum Action {
     TogglePause,
     OpenSettings,
     ChooseVault,
+    ImportWebConfig,
     OpenConfigFile,
     ExportPng,
     ToggleLogin,
@@ -33,16 +34,18 @@ impl AppMenu {
         let pause = CheckMenuItem::new("Pause Wallpaper", true, false, None);
         let settings = MenuItem::new("Settings…", true, None);
         let vault = MenuItem::new("Choose Vault…", true, None);
+        let import = MenuItem::new("Import Web Version Settings…", true, None);
         let config = MenuItem::new("Open Config File", true, None);
         let export = MenuItem::new("Export PNG", true, None);
         let login = CheckMenuItem::new("Start at Login", true, login_enabled, None);
         let quit = MenuItem::new("Quit Vault Wallpaper", true, None);
         let sep = PredefinedMenuItem::separator;
-        menu.append_items(&[&status, &sep(), &pause, &settings, &vault, &sep(), &export, &config, &login, &sep(), &quit]).ok()?;
+        menu.append_items(&[&status, &sep(), &pause, &settings, &vault, &import, &sep(), &export, &config, &login, &sep(), &quit]).ok()?;
         let ids = vec![
             (pause.id().clone(), Action::TogglePause),
             (settings.id().clone(), Action::OpenSettings),
             (vault.id().clone(), Action::ChooseVault),
+            (import.id().clone(), Action::ImportWebConfig),
             (config.id().clone(), Action::OpenConfigFile),
             (export.id().clone(), Action::ExportPng),
             (login.id().clone(), Action::ToggleLogin),
