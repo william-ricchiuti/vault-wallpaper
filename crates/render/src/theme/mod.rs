@@ -5,7 +5,9 @@
 //! - a style ([`Theme::style`]): colours and effects, starting from the config;
 //! - a scene builder ([`Theme::build`]): what gets drawn into the cached scene;
 //! - an ambient motion ([`Theme::ambient`]) the window server runs on the glow layer
-//!   with no app frames, or none.
+//!   with no app frames, or none;
+//! - optionally, an edit burst ([`Theme::edit_burst`], [`Theme::burst_sprites`]): a
+//!   short animation over the still scene when a note is saved.
 //!
 //! The web version's theme ids map onto the default look (they were Canvas2D designs
 //! that don't port cheaply); the native themes have ids of their own.
@@ -16,6 +18,7 @@ mod night_sky;
 use vw_core::config::Config;
 use vw_core::layout::LayoutGraph;
 
+use crate::burst::{BurstInstance, BurstKind, EditBurst};
 use crate::look::Look;
 use crate::scene::{SceneData, SceneStyle, build_scene, style_from_config};
 use crate::Framing;
@@ -89,4 +92,44 @@ impl Theme {
             None => Ambient::None,
         }
     }
+
+    /// What this theme does when a note is saved, under the config's motion setting.
+    /// `None`: nothing animates (the scene simply redraws once with the edit).
+    pub fn edit_burst(self, cfg: &Config) -> Option<EditBurst> {
+        let fps = burst_fps(cfg)?;
+        match self {
+            Theme::InkPaper => Some(EditBurst { kind: BurstKind::InkBleed, duration: 2.0, fps }),
+            Theme::Default | Theme::NightSky => None,
+        }
+    }
+
+    /// The burst sprites for the edited notes `nodes` (indices into `graph`), in the
+    /// same screen points as [`Theme::build`], with progress 0.
+    pub fn burst_sprites(
+        self,
+        graph: &LayoutGraph,
+        look: &Look,
+        positions: &[[f32; 2]],
+        framing: &Framing,
+        nodes: &[usize],
+    ) -> Vec<BurstInstance> {
+        match self {
+            Theme::InkPaper => ink_paper::burst_sprites(graph, look, positions, framing, nodes),
+            Theme::Default | Theme::NightSky => Vec::new(),
+        }
+    }
+}
+
+/// Frame-rate cap for edit bursts: none in Still, low otherwise. Bursts are short and
+/// rare, so they can afford a few more frames than ambient motion, but are designed
+/// to read well at these rates.
+pub fn burst_fps(cfg: &Config) -> Option<f32> {
+    let fps: f32 = match cfg.motion_mode {
+        vw_core::config::MotionMode::Still => return None,
+        vw_core::config::MotionMode::Light => 8.0,
+        vw_core::config::MotionMode::Balanced => 12.0,
+        vw_core::config::MotionMode::Showcase => 20.0,
+    };
+    let fps = fps.min(cfg.max_fps as f32);
+    (fps > 0.0).then_some(fps)
 }

@@ -232,3 +232,55 @@ pub fn materialize<'a>(entries: impl IntoIterator<Item = &'a Entry>, root: &Path
 
     Graph { nodes, links, tagged, discovered_tags }
 }
+
+impl Graph {
+    /// Notes edited between `old` and `self`: real notes (not ghosts) that are new or
+    /// whose modification time moved forward. This is the edit signal themes react to
+    /// (Ink & Paper's bleed, Pulse); it costs one pass over the notes, once per
+    /// watcher batch.
+    pub fn edited_since(&self, old: &Graph) -> Vec<String> {
+        let before: HashMap<&str, Option<f64>> = old.nodes.iter().map(|n| (n.id.as_str(), n.mtime)).collect();
+        self.nodes
+            .iter()
+            .filter(|n| !n.ghost)
+            .filter(|n| match before.get(n.id.as_str()) {
+                None => true,
+                Some(prev) => match (prev, n.mtime) {
+                    (Some(a), Some(b)) => b > *a,
+                    (None, Some(_)) => true,
+                    _ => false,
+                },
+            })
+            .map(|n| n.id.clone())
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::*;
+
+    fn node(id: &str, mtime: Option<f64>, ghost: bool) -> Node {
+        Node { id: id.into(), label: None, tag: None, tags: None, mtime, folder: None, ghost }
+    }
+
+    fn graph(nodes: Vec<Node>) -> Graph {
+        Graph { nodes, ..Graph::default() }
+    }
+
+    #[test]
+    fn edits_are_newer_or_new_notes() {
+        let old = graph(vec![node("a", Some(1.0), false), node("b", Some(1.0), false), node("g", None, true)]);
+        let new = graph(vec![
+            node("a", Some(2.0), false),
+            node("b", Some(1.0), false),
+            node("c", Some(5.0), false),
+            node("g", None, true),
+            node("h", None, true),
+        ]);
+        assert_eq!(new.edited_since(&old), vec!["a".to_string(), "c".to_string()]);
+        assert!(new.edited_since(&new).is_empty());
+        // Going back in time (a restore) is not an edit we animate.
+        assert!(old.edited_since(&new).is_empty());
+    }
+}

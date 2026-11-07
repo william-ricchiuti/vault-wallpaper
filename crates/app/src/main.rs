@@ -9,7 +9,9 @@
 //! Threads: the vault watcher, the config watcher and the layout engine run in the
 //! background and post results to the main thread. The main thread redraws the cached
 //! scene only when something changed, and runs cheap composite-only frames while glow
-//! breathes. A settled, still wallpaper draws nothing at all.
+//! breathes. Saving a note can start a short edit burst (Ink & Paper's ink bleed),
+//! drawn at a low frame rate into a small overlay layer over the still scene; when it
+//! ends the layer hides. A settled, still wallpaper draws nothing at all.
 
 mod desktop;
 mod menu;
@@ -25,10 +27,10 @@ use vw_core::config::{self, Config, ConfigWatcher};
 use vw_core::layout::{LayoutEngine, LayoutFrame, LayoutGraph};
 use vw_core::vault::{Graph, Vault, VaultWatcher, watch};
 use menu::{Action, AppMenu};
-use overlay::GlowOverlay;
+use overlay::{BurstOverlay, GlowOverlay};
 use tray_icon::menu::MenuEvent;
 use vw_render::{
-    Ambient, Framing, FramingOptions, Gpu, Look, LookContext, SceneStyle, Theme, WallpaperRenderer, derive_look, preferred_format,
+    Ambient, BurstInstance, EditBurst, Framing, FramingOptions, Gpu, Look, LookContext, SceneStyle, Theme, WallpaperRenderer, derive_look, preferred_format,
     render_rgba, write_png,
 };
 use winit::application::ApplicationHandler;
@@ -41,6 +43,10 @@ use winit::window::{Window, WindowId};
 /// How often moving layout frames are drawn while the graph settles. Settling is
 /// short and rare (first run, big edits); a low rate keeps it cheap.
 const LAYOUT_FPS: f64 = 12.0;
+
+/// A watcher batch that edits more notes than this is a bulk change (a sync, a git
+/// checkout), not someone saving a note: it redraws, but doesn't animate.
+const MAX_BURSTS: usize = 16;
 
 enum AppEvent {
     Graph(Box<Graph>),
@@ -111,6 +117,14 @@ struct Screen {
     /// The screen needs a composite (after a scene change, or an animation step).
     frame_dirty: bool,
     visible: bool,
+    /// Edit bursts' layer, made on the first burst this screen shows.
+    burst_overlay: Option<BurstOverlay>,
+    /// This screen's sprites for the running bursts, with each burst's start.
+    sprites: Vec<(Instant, BurstInstance)>,
+    /// `sprites` must be recomputed (bursts started or ended, or the scene moved).
+    sprites_dirty: bool,
+    /// A burst frame is due.
+    burst_due: bool,
 }
 
 impl Screen {
@@ -152,6 +166,17 @@ struct App {
     menu: Option<AppMenu>,
     /// Paused from the menu: keep the last frame, draw nothing new.
     paused: bool,
+    /// What saving a note does under the current theme and motion setting.
+    edit_burst: Option<EditBurst>,
+    /// Notes edited in graphs sent to the layout engine but not shown yet, by the
+    /// layout generation that will show them.
+    pending_edits: Vec<(u64, Vec<String>)>,
+    /// Running bursts: the edited note's id and when its burst started.
+    bursts: Vec<(String, Instant)>,
+    /// When the next burst frame is due.
+    burst_next: Instant,
+    /// Burst frames drawn since the bursts last settled (for the log).
+    burst_frames: u32,
 }
 
 impl App {
@@ -204,6 +229,22 @@ impl App {
         self.send_graph(graph);
     }
 
+    /// A graph from the vault watcher: an edit. Notes it saved are remembered, and
+    /// their bursts start once the layout frame that shows this graph arrives.
+    fn on_graph(&mut self, graph: Graph) {
+        if self.edit_burst.is_some()
+            && let Some((old, _)) = self.sent.last()
+        {
+            let edited = graph.edited_since(old);
+            if !edited.is_empty() && edited.len() <= MAX_BURSTS {
+                // send_graph makes this the generation after the last one sent.
+                let generation = self.sent_base + self.sent.len() as u64 + 1;
+                self.pending_edits.push((generation, edited));
+            }
+        }
+        self.send_graph(graph);
+    }
+
     fn send_graph(&mut self, graph: Graph) {
         let layout = LayoutGraph::from_graph(&graph);
         if let Some(engine) = &self.engine {
@@ -241,6 +282,42 @@ impl App {
         };
         self.shown = Some(Shown { graph, layout, look, positions: frame.positions });
         self.invalidate_scene();
+        self.start_bursts(frame.generation);
+    }
+
+    /// Starts the bursts for edits whose graph is now on screen.
+    fn start_bursts(&mut self, generation: u64) {
+        let (ready, waiting): (Vec<_>, Vec<_>) = self.pending_edits.drain(..).partition(|(g, _)| *g <= generation);
+        self.pending_edits = waiting;
+        if ready.is_empty() || self.edit_burst.is_none() || self.paused || desktop::low_power_mode() {
+            return;
+        }
+        let now = Instant::now();
+        for id in ready.into_iter().flat_map(|(_, ids)| ids) {
+            // Saving again while it still bleeds starts it over.
+            self.bursts.retain(|(b, _)| *b != id);
+            self.bursts.push((id, now));
+        }
+        self.bursts.truncate(MAX_BURSTS);
+        eprintln!("[{:.0} ms] edit burst: {} note(s)", self.ms(), self.bursts.len());
+        self.burst_next = now;
+        for s in &mut self.screens {
+            s.sprites_dirty = true;
+        }
+    }
+
+    /// Ends every burst at once (pause, theme or motion change).
+    fn stop_bursts(&mut self) {
+        self.bursts.clear();
+        self.pending_edits.clear();
+        let Some(gpu) = &self.gpu else { return };
+        for s in &mut self.screens {
+            s.sprites.clear();
+            s.burst_due = false;
+            if let Some(o) = &mut s.burst_overlay {
+                o.hide(gpu);
+            }
+        }
     }
 
     fn on_config(&mut self, cfg: Config) {
@@ -270,6 +347,10 @@ impl App {
         self.theme = Theme::from_config(&self.cfg);
         self.style = self.theme.style(&self.cfg, false);
         self.framing = FramingOptions::from_config(&self.cfg);
+        self.edit_burst = self.theme.edit_burst(&self.cfg);
+        if self.edit_burst.is_none() {
+            self.stop_bursts();
+        }
         self.update_breathing();
     }
 
@@ -361,6 +442,10 @@ impl App {
             scene_dirty: true,
             frame_dirty: true,
             visible: true,
+            burst_overlay: None,
+            sprites: Vec::new(),
+            sprites_dirty: true,
+            burst_due: false,
         });
     }
 
@@ -368,10 +453,32 @@ impl App {
         let breathing = self.breathing();
         let Some(gpu) = &self.gpu else { return };
         let Some(s) = self.screens.iter_mut().find(|s| s.window.id() == id) else { return };
-        if !s.frame_dirty || !s.check_visible() {
+        if !(s.frame_dirty || s.burst_due) || !s.check_visible() {
             // Nothing new, or hidden: a hidden screen stays dirty and draws when seen.
             return;
         }
+        if s.frame_dirty {
+            Self::draw_scene(gpu, s, self.shown.as_ref(), self.theme, &self.style, &self.framing, breathing);
+        }
+        if s.burst_due {
+            s.burst_due = false;
+            if let (Some(burst), Some(shown)) = (self.edit_burst, &self.shown) {
+                Self::draw_bursts(gpu, s, shown, self.theme, &self.bursts, &self.framing, burst);
+                self.burst_frames += 1;
+            }
+        }
+    }
+
+    /// Redraws the cached scene if it is out of date, and composites it to the screen.
+    fn draw_scene(
+        gpu: &Gpu,
+        s: &mut Screen,
+        shown: Option<&Shown>,
+        theme: Theme,
+        style: &SceneStyle,
+        framing: &FramingOptions,
+        breathing: Option<(f32, f32, f32)>,
+    ) {
         let frame = match s.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Occluded => {
@@ -388,28 +495,79 @@ impl App {
         let size = [s.config.width, s.config.height];
         if s.scene_dirty {
             let points = [size[0] as f32 / scale, size[1] as f32 / scale];
-            let data = match &self.shown {
+            let data = match shown {
                 Some(sh) => {
-                    let framing = Framing::fit(&sh.positions, points[0], points[1], &self.framing);
-                    self.theme.build(&sh.layout, &sh.look, &sh.positions, &framing, &self.style, points)
+                    let framing = Framing::fit(&sh.positions, points[0], points[1], framing);
+                    theme.build(&sh.layout, &sh.look, &sh.positions, &framing, style, points)
                 }
                 None => Default::default(),
             };
-            s.renderer.set_scene(gpu, size, scale, &data, &self.style);
+            s.renderer.set_scene(gpu, size, scale, &data, style);
             s.scene_dirty = false;
+            // Notes may have moved under running bursts.
+            s.sprites_dirty = true;
         }
         let view = frame.texture.create_view(&Default::default());
         match &mut s.overlay {
             Some(o) => {
-                s.renderer.composite_scene_only(gpu, &view, &self.style);
-                o.draw(gpu, &s.renderer, &self.style);
+                s.renderer.composite_scene_only(gpu, &view, style);
+                o.draw(gpu, &s.renderer, style);
                 o.set_breathing(breathing);
             }
-            None => s.renderer.composite(gpu, &view, &self.style, 1.0),
+            None => s.renderer.composite(gpu, &view, style, 1.0),
         }
         s.window.pre_present_notify();
         gpu.queue.present(frame);
         s.frame_dirty = false;
+    }
+
+    /// One burst frame into the screen's burst layer: a few sprites, each at its own
+    /// progress. The scene is not touched.
+    fn draw_bursts(
+        gpu: &Gpu,
+        s: &mut Screen,
+        shown: &Shown,
+        theme: Theme,
+        bursts: &[(String, Instant)],
+        framing: &FramingOptions,
+        burst: EditBurst,
+    ) {
+        let Some(ns_window) = &s.ns_window else { return };
+        let scale = s.window.scale_factor() as f32;
+        let points = [s.config.width as f32 / scale, s.config.height as f32 / scale];
+        if s.sprites_dirty {
+            s.sprites_dirty = false;
+            let framing = Framing::fit(&shown.positions, points[0], points[1], framing);
+            s.sprites = bursts
+                .iter()
+                .filter_map(|(id, start)| {
+                    let i = shown.layout.id.iter().position(|x| x == id)?;
+                    let sprite = theme.burst_sprites(&shown.layout, &shown.look, &shown.positions, &framing, &[i]).pop()?;
+                    Some((*start, sprite))
+                })
+                .collect();
+            let Some(region) = vw_render::burst::region(&s.sprites.iter().map(|(_, b)| *b).collect::<Vec<_>>(), points) else {
+                s.sprites.clear();
+                if let Some(o) = &mut s.burst_overlay {
+                    o.hide(gpu);
+                }
+                return;
+            };
+            if s.burst_overlay.is_none() {
+                s.burst_overlay = BurstOverlay::new(gpu, ns_window, s.config.format);
+            }
+            if let Some(o) = &mut s.burst_overlay {
+                o.set_region(gpu, ns_window, region, scale);
+            }
+        }
+        let (Some(o), false) = (&mut s.burst_overlay, s.sprites.is_empty()) else { return };
+        let now = Instant::now();
+        let frame: Vec<BurstInstance> = s
+            .sprites
+            .iter()
+            .map(|(start, b)| BurstInstance { progress: vw_render::burst::progress(now - *start, burst.duration), ..*b })
+            .collect();
+        o.draw(gpu, burst.kind, &frame);
     }
 
     fn on_action(&mut self, action: Action, event_loop: &ActiveEventLoop) {
@@ -418,6 +576,9 @@ impl App {
                 self.paused = !self.paused;
                 if let Some(m) = &self.menu {
                     m.set_paused(self.paused);
+                }
+                if self.paused {
+                    self.stop_bursts();
                 }
                 self.update_breathing();
                 self.invalidate_scene();
@@ -465,6 +626,40 @@ impl App {
         }
     }
 
+    /// Ends finished bursts and asks for the next burst frame when one is due.
+    /// Returns when to wake for the next one; `None` once every burst has settled.
+    fn step_bursts(&mut self, now: Instant) -> Option<Instant> {
+        let burst = self.edit_burst?;
+        if self.bursts.is_empty() {
+            return None;
+        }
+        let duration = Duration::from_secs_f32(burst.duration);
+        let before = self.bursts.len();
+        self.bursts.retain(|(_, start)| now.duration_since(*start) < duration);
+        if self.bursts.len() != before {
+            for s in &mut self.screens {
+                s.sprites_dirty = true;
+            }
+        }
+        if self.bursts.is_empty() {
+            // Settled: the still scene underneath is the final state.
+            eprintln!("[{:.0} ms] edit bursts settled after {} frame(s)", self.ms(), self.burst_frames);
+            self.burst_frames = 0;
+            self.stop_bursts();
+            return None;
+        }
+        if now >= self.burst_next {
+            for s in &mut self.screens {
+                if s.visible {
+                    s.burst_due = true;
+                    s.window.request_redraw();
+                }
+            }
+            self.burst_next = now + Duration::from_secs_f32(1.0 / burst.fps);
+        }
+        Some(self.burst_next)
+    }
+
     /// Renders the first screen's current picture to a PNG in ~/Pictures/Vault Wallpaper.
     fn export_png(&self) -> Result<PathBuf, String> {
         let (Some(gpu), Some(screen), Some(sh)) = (&self.gpu, self.screens.first(), &self.shown) else {
@@ -495,6 +690,13 @@ impl ApplicationHandler<AppEvent> for App {
             self.add_screen(event_loop, m.position(), m.size());
         }
         eprintln!("[{:.0} ms] {} screen(s), low power mode {}", self.ms(), self.screens.len(), desktop::low_power_mode());
+        if std::env::var_os("VW_WINDOW_IDS").is_some() {
+            for s in &self.screens {
+                if let Some(w) = &s.ns_window {
+                    eprintln!("window id {}", w.windowNumber());
+                }
+            }
+        }
         let proxy = self.proxy.clone();
         self.menu = AppMenu::new(desktop::login::enabled(), move |e| {
             let _ = proxy.send_event(AppEvent::Menu(e));
@@ -511,7 +713,7 @@ impl ApplicationHandler<AppEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
-            AppEvent::Graph(g) => self.send_graph(*g),
+            AppEvent::Graph(g) => self.on_graph(*g),
             AppEvent::Layout(f) => self.on_layout(*f),
             AppEvent::Config(c) => self.on_config(*c),
             AppEvent::Menu(e) => {
@@ -579,6 +781,9 @@ impl ApplicationHandler<AppEvent> for App {
             let next = self.power_checked + Duration::from_secs(60);
             wake = Some(wake.map_or(next, |w| w.min(next)));
         }
+        if let Some(next) = self.step_bursts(now) {
+            wake = Some(wake.map_or(next, |w| w.min(next)));
+        }
         event_loop.set_control_flow(match wake {
             Some(t) => ControlFlow::WaitUntil(t),
             None => ControlFlow::Wait,
@@ -613,6 +818,12 @@ fn main() {
         low_power: desktop::low_power_mode(),
         menu: None,
         paused: false,
+        edit_burst: None,
+        pending_edits: Vec::new(),
+        bursts: Vec::new(),
+        burst_next: Instant::now(),
+        burst_frames: 0,
     };
+    app.edit_burst = app.theme.edit_burst(&app.cfg);
     event_loop.run_app(&mut app).expect("run");
 }
