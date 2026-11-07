@@ -3757,6 +3757,7 @@ checksum = "3a3b425286980a367278453f3b6d28cdcb134b574e5a35824a6ff5eebad50bb6"
 name = "vault-wallpaper"
 version = "0.1.0"
 dependencies = [
+ "block2 0.6.2",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
