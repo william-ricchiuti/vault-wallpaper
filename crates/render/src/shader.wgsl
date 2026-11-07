@@ -32,6 +32,16 @@ fn hash2(p: vec2<f32>) -> f32 {
   return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
 }
 
+// Smooth value noise in 0..1 (bilinear between hashed lattice points).
+fn vnoise(p: vec2<f32>) -> f32 {
+  let i = floor(p);
+  let f = p - i;
+  let w = f * f * (3.0 - 2.0 * f);
+  let a = mix(hash2(i), hash2(i + vec2<f32>(1.0, 0.0)), w.x);
+  let b = mix(hash2(i + vec2<f32>(0.0, 1.0)), hash2(i + vec2<f32>(1.0, 1.0)), w.x);
+  return mix(a, b, w.y);
+}
+
 // A sparse field of faint background stars, fixed in screen space (drawn once with
 // the scene, so it costs nothing afterwards).
 fn starfield(pt: vec2<f32>) -> f32 {
@@ -55,9 +65,9 @@ fn starfield(pt: vec2<f32>) -> f32 {
   if (u.bg_mode > 1.5) {
     // Paper: low-frequency mottling plus fine fibre noise.
     let pt = in.uv * u.size;
-    let mottle = hash2(floor(pt / 40.0)) * 0.5 + hash2(floor(pt / 13.0)) * 0.5;
+    let mottle = vnoise(pt / 90.0) * 0.6 + vnoise(pt / 23.0 + 5.3) * 0.4;
     let fibre = hash2(floor(pt * u.scale));
-    base = base * (0.985 + mottle * 0.02 + fibre * 0.012);
+    base = base * (0.982 + mottle * 0.026 + fibre * 0.01);
   }
   if (u.background_glow.a <= 0.0) {
     if (u.bg_mode > 0.5 && u.bg_mode < 1.5) {
@@ -241,4 +251,87 @@ fn vnoise(x: f32) -> f32 {
   let rgb = mix(in.color.rgb, in.top.rgb, smoothstep(0.08, 0.65, max(h, 0.0) / height));
   let a = clamp(in.color.a * env * rays * profile, 0.0, 1.0);
   return vec4<f32>(rgb * a, a);
+}
+
+// ---- ink dots: a solid dot with a slightly ragged edge and a soft, fibrous bleed
+// into the paper. `radius` is the bleed's reach; the dot is INK_CORE of it. ----
+const INK_CORE: f32 = 0.42;
+
+struct InkOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) local: vec2<f32>,
+  @location(1) radius: f32,
+  @location(2) color: vec4<f32>,
+  @location(3) @interpolate(flat) seed: f32,
+};
+
+@vertex fn ink_vs(@builtin(vertex_index) v: u32, n: Node) -> InkOut {
+  let corners = array<vec2<f32>, 6>(vec2(-1., -1.), vec2(1., -1.), vec2(-1., 1.), vec2(-1., 1.), vec2(1., -1.), vec2(1., 1.));
+  let reach = n.radius + 1.0 / u.scale;
+  let off = corners[v] * reach;
+  var o: InkOut;
+  o.pos = to_clip(n.center + off);
+  o.local = off;
+  o.radius = n.radius;
+  o.color = n.color;
+  o.seed = hash2(n.center) * 6.2831853;
+  return o;
+}
+
+@fragment fn ink_fs(in: InkOut) -> @location(0) vec4<f32> {
+  let d = length(in.local);
+  let a = atan2(in.local.y, in.local.x);
+  let s = in.seed;
+  // Low-order wobble around the rim: ink never prints a perfect circle.
+  let wob = sin(a * 2.0 + s) * 0.5 + sin(a * 3.0 + s * 1.7) * 0.3 + sin(a * 7.0 + s * 2.9) * 0.2;
+  let core = in.radius * INK_CORE * (1.0 + wob * 0.07);
+  let cover = clamp((core - d) * u.scale + 0.5, 0.0, 1.0);
+  // Bleed: falls off from the dot's edge, lumpier than the dot, broken up by fibres.
+  let t = clamp((d - core) / max(in.radius - core, 1e-3), 0.0, 1.0);
+  let lump = 1.0 + 0.45 * (sin(a * 5.0 + s * 3.1) * 0.6 + sin(a * 11.0 + s * 0.7) * 0.4);
+  let fibre = 0.82 + 0.36 * hash2(floor(in.pos.xy / max(u.scale, 1.0)));
+  let bleed = pow(1.0 - t, 2.6) * 0.26 * lump * fibre;
+  // Ink pools a little toward the rim of the dot, so its centre reads a touch lighter.
+  let pool = mix(0.88, 1.0, smoothstep(0.0, core, d));
+  let alpha = cover * pool + (1.0 - cover) * bleed;
+  return vec4<f32>(in.color.rgb, clamp(in.color.a * alpha, 0.0, 1.0));
+}
+
+// ---- ink links: a pen stroke, thin at the ends and swelling to full width a little
+// off-centre (the swell point varies per link) ----
+struct InkEdgeOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) across: f32,
+  @location(1) half: f32,
+  @location(2) color: vec4<f32>,
+  @location(3) along: f32,
+  @location(4) @interpolate(flat) peak: f32,
+};
+
+@vertex fn ink_edge_vs(@builtin(vertex_index) v: u32, e: Edge) -> InkEdgeOut {
+  let corners = array<vec2<f32>, 6>(vec2(0., -1.), vec2(1., -1.), vec2(0., 1.), vec2(0., 1.), vec2(1., -1.), vec2(1., 1.));
+  let c = corners[v];
+  var dir = e.b - e.a;
+  let len = length(dir);
+  dir = select(vec2<f32>(1.0, 0.0), dir / len, len > 1e-4);
+  let n = vec2<f32>(-dir.y, dir.x);
+  let half = e.width * 0.5;
+  let reach = half + 1.0 / u.scale;
+  var o: InkEdgeOut;
+  o.pos = to_clip(mix(e.a, e.b, c.x) + n * c.y * reach);
+  o.across = c.y * reach;
+  o.half = half;
+  o.color = e.color;
+  o.along = c.x;
+  o.peak = 0.38 + 0.24 * hash2(e.a * 0.37 + e.b * 0.61);
+  return o;
+}
+
+@fragment fn ink_edge_fs(in: InkEdgeOut) -> @location(0) vec4<f32> {
+  let span = select(1.0 - in.peak, in.peak, in.along < in.peak);
+  let k = (in.along - in.peak) / span;
+  let half = in.half * (0.35 + 0.65 * (1.0 - k * k));
+  let cover = clamp((half - abs(in.across)) * u.scale + 0.5, 0.0, 1.0);
+  let thin = min(1.0, half * 2.0 * u.scale);
+  return vec4<f32>(in.color.rgb, in.color.a * cover * thin);
 }

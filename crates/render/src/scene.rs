@@ -178,6 +178,9 @@ impl SceneStyle {
     }
 }
 
+/// Solid ink dot radius as a fraction of an ink instance's radius (see `ink_fs`).
+pub const INK_CORE: f32 = 0.42;
+
 /// Everything the cached scene draws, in screen points.
 #[derive(Debug, Clone, Default)]
 pub struct SceneData {
@@ -189,6 +192,11 @@ pub struct SceneData {
     pub stars: Vec<NodeInstance>,
     /// Aurora curtains, drawn into the glow layer (Aurora Lite).
     pub curtains: Vec<CurtainInstance>,
+    /// Ink dots that bleed into the paper (Ink & Paper). `radius` is the bleed's
+    /// outer reach; the solid dot is [`INK_CORE`] of it.
+    pub inks: Vec<NodeInstance>,
+    /// Pen strokes that swell in the middle and thin toward their ends (Ink & Paper).
+    pub ink_edges: Vec<EdgeInstance>,
     pub text: Vec<TextItem>,
 }
 
