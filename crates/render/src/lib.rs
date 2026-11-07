@@ -12,6 +12,7 @@
 //!
 //! Nothing here runs on its own; the app asks for frames.
 
+pub mod burst;
 mod framing;
 mod look;
 mod scene;
@@ -22,6 +23,7 @@ use std::path::Path;
 
 use bytemuck::{Pod, Zeroable};
 
+pub use burst::{BurstInstance, BurstKind, BurstRenderer, EditBurst, render_bursts_rgba};
 pub use framing::{Framing, FramingMode, FramingOptions, SafeArea};
 pub use look::{LabelPick, Look, LookContext, derive_look};
 pub use scene::{BgMode, EdgeStyle, SceneData, SceneStyle, build_scene, parse_hex, style_from_config, tag_color};
