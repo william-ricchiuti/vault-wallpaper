@@ -80,12 +80,13 @@ const THUMBNAILS: &[(&str, &[u8])] = thumbnails!(
 /// Native theme previews, 640x416 JPEG: the real-vault renders from
 /// `cargo run --release -p vw-render --example render_vault -- <vault> out.png --theme <id> --size 1512 982 1`,
 /// downscaled with `sips -Z 640 -s format jpeg -s formatOptions 78`. A theme listed in
-/// `themes.json` without an image here (Pulse, until it has one) gets no `preview`.
+/// `themes.json` without an image here gets no `preview`.
 const THEME_PREVIEWS: &[(&str, &[u8])] = &[
     ("default", include_bytes!("../../assets/themes/default.jpg")),
     ("night-sky", include_bytes!("../../assets/themes/night-sky.jpg")),
     ("aurora-lite", include_bytes!("../../assets/themes/aurora-lite.jpg")),
     ("ink-paper", include_bytes!("../../assets/themes/ink-paper.jpg")),
+    ("pulse", include_bytes!("../../assets/themes/pulse.jpg")),
 ];
 
 /// What the handler reads and writes. Shared between the web view's protocol handler and
@@ -633,8 +634,8 @@ mod tests {
                     assert_eq!(r.status(), 200, "{p}");
                     assert_eq!(&r.body()[..2], [0xff, 0xd8], "{p} is a JPEG");
                 }
-                // Only a native theme still waiting for its render may lack one.
-                None => assert!(t.get("native").is_none() || t["id"] == "pulse", "{}", t["id"]),
+                // Every native theme has a preview.
+                None => assert!(t.get("native").is_none(), "{}", t["id"]),
             }
         }
         assert_eq!(
