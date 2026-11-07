@@ -202,7 +202,7 @@ fn hash1(x: f32) -> f32 {
   return fract(sin(x * 127.1) * 43758.5453);
 }
 
-fn vnoise(x: f32) -> f32 {
+fn vnoise1(x: f32) -> f32 {
   let i = floor(x);
   let f = fract(x);
   return mix(hash1(i), hash1(i + 1.0), f * f * (3.0 - 2.0 * f));
@@ -237,9 +237,9 @@ fn vnoise(x: f32) -> f32 {
   let fold = (sin(s * 3.4 + seed) * 0.55 + sin(s * 7.3 + seed * 2.3) * 0.3 + sin(s * 13.0 + seed * 0.7) * 0.15) * height * 0.2;
   let h = fold - in.local.y;   // height above the base line
   // Rays: vertical striations of varying brightness and height.
-  let r = vnoise(x / 11.0 + seed * 7.0) * 0.5 + vnoise(x / 29.0 + seed * 3.0) * 0.5;
+  let r = vnoise1(x / 11.0 + seed * 7.0) * 0.5 + vnoise1(x / 29.0 + seed * 3.0) * 0.5;
   let rays = 0.15 + 0.85 * r * r * 1.6;
-  let reach = height * (0.45 + 0.55 * vnoise(x / 70.0 + seed * 5.0)) * (0.45 + 0.55 * env);
+  let reach = height * (0.45 + 0.55 * vnoise1(x / 70.0 + seed * 5.0)) * (0.45 + 0.55 * env);
   var profile: f32;
   if (h < 0.0) {
     let soft = 5.0 + height * 0.035;

@@ -155,15 +155,15 @@ impl SettingsWindow {
     }
 
     /// Runs `js` in the page. For tests and debugging (the example's `VW_SETTINGS_SCRIPT`).
+    #[allow(dead_code)]
     pub fn evaluate_script(&self, js: &str) {
         let _ = self.webview.evaluate_script(js);
     }
 
     /// Supplies the vault's tags (name, note count) for the tag-colour list, and refreshes
     /// the page if it's showing. Call after opening and whenever the graph changes.
-    ///
-    /// TODO(app): wire this to the live graph (the web version's `discoveredTags`); until
-    /// then `/api/tags` is empty.
+    /// The app sends the live graph's `discoveredTags` after opening and on each new
+    /// graph.
     pub fn set_tags(&self, tags: Vec<(String, usize)>) {
         if let Ok(mut b) = self.backend.lock() {
             b.tags = tags;

@@ -291,6 +291,19 @@ Default renderer: Phase 4 rebuilds it under the same rules. Options that can't m
 (constant particle streams, full-rate depth of field) are reworked or dropped, and presets map onto
 what remains.
 
+#### Phase 5 and 6 progress (2026-11-06)
+- App shell: menu-bar icon (pause, settings, choose vault, export PNG, open config, start at
+  login, quit), a vault folder picker on first run, and the settings window (`settings.html`
+  in an on-demand wry web view, answered in-process over `vw://app`, no port).
+- Themes, with a framework (style + scene builder + window-server motion): **Night Sky**,
+  **Aurora Lite** and **Ink & Paper** (still, with an edit-triggered 2 s ink bleed). All four
+  looks on the real vault: `docs/phase6/all-themes.png`. Themed scenes render in ~35 ms.
+- Framing now fits the linked core and pushes unlinked notes to an outer ring, so dense
+  vaults fill the screen.
+- Ink bleed cost: memory rises to ~294 MB for the 2 s of a burst (presented frames) and
+  returns to ~103 MB right after; ~0.1 s CPU per burst. Possible later: a smaller burst layer.
+- Still to do: Pulse; a second look at the settings window with real typing.
+
 ### Phase 7: Packaging and release (S–M)
 **You get:** a download that opens with no warnings and keeps itself up to date.
 - Universal binary (Apple Silicon + Intel), app bundle and `Info.plist`, icon.

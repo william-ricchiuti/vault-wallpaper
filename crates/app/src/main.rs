@@ -16,6 +16,7 @@
 mod desktop;
 mod menu;
 mod overlay;
+mod settings;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,6 +29,7 @@ use vw_core::layout::{LayoutEngine, LayoutFrame, LayoutGraph};
 use vw_core::vault::{Graph, Vault, VaultWatcher, watch};
 use menu::{Action, AppMenu};
 use overlay::{BurstOverlay, GlowOverlay};
+use settings::SettingsWindow;
 use tray_icon::menu::MenuEvent;
 use vw_render::{
     Ambient, BurstInstance, EditBurst, Framing, FramingOptions, Gpu, Look, LookContext, SceneStyle, Theme, WallpaperRenderer, derive_look, preferred_format,
@@ -164,6 +166,8 @@ struct App {
     power_checked: Instant,
     low_power: bool,
     menu: Option<AppMenu>,
+    /// Open only while the user has it open; closing drops the web view.
+    settings: Option<SettingsWindow>,
     /// Paused from the menu: keep the last frame, draw nothing new.
     paused: bool,
     /// What saving a note does under the current theme and motion setting.
@@ -281,6 +285,7 @@ impl App {
             _ => self.look_for(&graph, &layout),
         };
         self.shown = Some(Shown { graph, layout, look, positions: frame.positions });
+        self.send_tags();
         self.invalidate_scene();
         self.start_bursts(frame.generation);
     }
@@ -320,6 +325,15 @@ impl App {
         }
     }
 
+    /// Gives the settings page the vault's tags (for the tag-colour list).
+    fn send_tags(&self) {
+        if let (Some(s), Some(sh)) = (&self.settings, &self.shown) {
+            let mut tags: Vec<(String, usize)> = sh.graph.discovered_tags.iter().map(|(t, n)| (t.clone(), *n)).collect();
+            tags.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            s.set_tags(tags);
+        }
+    }
+
     fn on_config(&mut self, cfg: Config) {
         let old_vault = self.vault_path();
         let old = std::mem::replace(&mut self.cfg, cfg);
@@ -340,6 +354,9 @@ impl App {
             self.open_vault();
         }
         self.invalidate_scene();
+        if let Some(s) = &self.settings {
+            s.config_changed();
+        }
         eprintln!("[{:.0} ms] config reloaded", self.ms());
     }
 
@@ -599,8 +616,25 @@ impl App {
                     }
                 }
             }
-            // The settings window lands in Phase 5; until then, the file itself.
-            Action::OpenSettings | Action::OpenConfigFile => {
+            Action::OpenSettings => {
+                if let Some(s) = &self.settings {
+                    s.focus();
+                } else {
+                    if !self.args.config.exists() && config::save(&self.args.config, &self.cfg).is_err() {
+                        return;
+                    }
+                    match SettingsWindow::open(event_loop, self.args.config.clone()) {
+                        Ok(w) => {
+                            self.settings = Some(w);
+                            self.send_tags();
+                        }
+                        Err(e) => eprintln!("settings window: {e}"),
+                    }
+                }
+                // A menu-bar app isn't frontmost: bring the window forward.
+                desktop::activate();
+            }
+            Action::OpenConfigFile => {
                 if !self.args.config.exists() && config::save(&self.args.config, &self.cfg).is_err() {
                     return;
                 }
@@ -725,6 +759,14 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if let Some(s) = &mut self.settings
+            && s.window_id() == id
+        {
+            if !s.handle_event(&event) {
+                self.settings = None;
+            }
+            return;
+        }
         match event {
             WindowEvent::RedrawRequested => self.draw(id),
             WindowEvent::Occluded(_) => {
@@ -817,6 +859,7 @@ fn main() {
         power_checked: Instant::now(),
         low_power: desktop::low_power_mode(),
         menu: None,
+        settings: None,
         paused: false,
         edit_burst: None,
         pending_edits: Vec::new(),

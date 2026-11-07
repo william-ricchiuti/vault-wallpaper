@@ -74,3 +74,11 @@ pub fn reveal(path: &std::path::Path) {
 pub fn open(path: &std::path::Path) {
     let _ = std::process::Command::new("open").arg(path).spawn();
 }
+
+/// Brings this (Dock-less) app to the front, so a window it opens gets focus.
+pub fn activate() {
+    if let Some(mtm) = objc2::MainThreadMarker::new() {
+        #[allow(deprecated)]
+        objc2_app_kit::NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    }
+}
