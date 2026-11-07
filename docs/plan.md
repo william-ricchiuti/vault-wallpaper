@@ -323,9 +323,9 @@ what remains.
   keeps its own repo and npm package and is still improved (decided 2026-11-05).
 - **Done when:** 1.0.0 is released and web-version users can find it.
 
-### Phase 9: Obsidian plugin (S–M, optional)
+### Phase 9: Obsidian plugin (S–M, optional) — built: `obsidian-plugin/`, `vw_core::presence`
 **You get:** the wallpaper knows what you are doing in Obsidian.
-- A small plugin that writes a state file inside the vault (`.obsidian/plugins/live-wallpaper/state.json`)
+- A small plugin that writes a state file inside the vault (`.obsidian/plugins/vault-wallpaper/state.json`)
   that the app already watches. No port. Contents: the note you have open, plus Obsidian's own resolved
   links when available.
 - Features: highlight the open note and its neighbourhood, pulse on save, exact link resolution.

@@ -16,6 +16,7 @@
 mod desktop;
 mod menu;
 mod overlay;
+mod presence;
 mod settings;
 
 use std::path::PathBuf;
@@ -29,6 +30,7 @@ use vw_core::layout::{LayoutEngine, LayoutFrame, LayoutGraph};
 use vw_core::vault::{Graph, Vault, VaultWatcher, watch};
 use menu::{Action, AppMenu};
 use overlay::{BurstOverlay, GlowOverlay};
+use presence::Presence;
 use settings::SettingsWindow;
 use tray_icon::menu::MenuEvent;
 use vw_render::{
@@ -55,6 +57,8 @@ enum AppEvent {
     Layout(Box<LayoutFrame>),
     Config(Box<Config>),
     Menu(MenuEvent),
+    /// The Obsidian plugin's state file changed (`None`: gone or unreadable).
+    Presence(Option<Box<vw_core::presence::PresenceState>>),
 }
 
 struct Args {
@@ -181,6 +185,8 @@ struct App {
     burst_next: Instant,
     /// Burst frames drawn since the bursts last settled (for the log).
     burst_frames: u32,
+    /// What the Obsidian plugin says is open; inert without the plugin.
+    presence: Presence,
 }
 
 impl App {
@@ -215,6 +221,7 @@ impl App {
     /// (Re)scans the vault and starts watching it.
     fn open_vault(&mut self) {
         self._vault_watcher = None;
+        self.presence = Presence::default();
         let Some(path) = self.vault_path() else {
             eprintln!("no vault set: pass --vault or set vaultPath in {}", self.args.config.display());
             return;
@@ -231,12 +238,18 @@ impl App {
             Err(e) => eprintln!("not watching the vault: {e}"),
         }
         self.send_graph(graph);
+        let proxy = self.proxy.clone();
+        self.presence = Presence::start(&path, move |s| {
+            let _ = proxy.send_event(AppEvent::Presence(s.map(Box::new)));
+        });
     }
 
     /// A graph from the vault watcher: an edit. Notes it saved are remembered, and
     /// their bursts start once the layout frame that shows this graph arrives.
     fn on_graph(&mut self, graph: Graph) {
+        // While the Obsidian plugin is live, its save reports start the bursts instead.
         if self.edit_burst.is_some()
+            && !self.presence.live(vw_core::presence::now_ms())
             && let Some((old, _)) = self.sent.last()
         {
             let edited = graph.edited_since(old);
@@ -259,7 +272,9 @@ impl App {
 
     fn look_for(&self, graph: &Graph, layout: &LayoutGraph) -> Look {
         let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64() * 1000.0);
-        derive_look(graph, layout, &self.cfg, &LookContext { now_ms, light: false })
+        let mut look = derive_look(graph, layout, &self.cfg, &LookContext { now_ms, light: false });
+        self.presence.apply(&mut look, graph, layout, &self.style, now_ms);
+        look
     }
 
     fn on_layout(&mut self, frame: LayoutFrame) {
@@ -294,11 +309,16 @@ impl App {
     fn start_bursts(&mut self, generation: u64) {
         let (ready, waiting): (Vec<_>, Vec<_>) = self.pending_edits.drain(..).partition(|(g, _)| *g <= generation);
         self.pending_edits = waiting;
-        if ready.is_empty() || self.edit_burst.is_none() || self.paused || desktop::low_power_mode() {
+        self.burst_notes(ready.into_iter().flat_map(|(_, ids)| ids).collect());
+    }
+
+    /// Starts (or restarts) the edit burst of these notes.
+    fn burst_notes(&mut self, ids: Vec<String>) {
+        if ids.is_empty() || self.edit_burst.is_none() || self.paused || desktop::low_power_mode() {
             return;
         }
         let now = Instant::now();
-        for id in ready.into_iter().flat_map(|(_, ids)| ids) {
+        for id in ids {
             // Saving again while it still bleeds starts it over.
             self.bursts.retain(|(b, _)| *b != id);
             self.bursts.push((id, now));
@@ -363,6 +383,7 @@ impl App {
     fn apply_style(&mut self) {
         self.theme = Theme::from_config(&self.cfg);
         self.style = self.theme.style(&self.cfg, false);
+        self.presence.adjust_style(&mut self.style, vw_core::presence::now_ms());
         self.framing = FramingOptions::from_config(&self.cfg);
         self.edit_burst = self.theme.edit_burst(&self.cfg);
         if self.edit_burst.is_none() {
@@ -750,6 +771,7 @@ impl ApplicationHandler<AppEvent> for App {
             AppEvent::Graph(g) => self.on_graph(*g),
             AppEvent::Layout(f) => self.on_layout(*f),
             AppEvent::Config(c) => self.on_config(*c),
+            AppEvent::Presence(s) => self.on_presence(s.map(|s| *s)),
             AppEvent::Menu(e) => {
                 if let Some(action) = self.menu.as_ref().and_then(|m| m.action(&e)) {
                     self.on_action(action, event_loop);
@@ -823,6 +845,9 @@ impl ApplicationHandler<AppEvent> for App {
             let next = self.power_checked + Duration::from_secs(60);
             wake = Some(wake.map_or(next, |w| w.min(next)));
         }
+        if let Some(next) = self.step_presence() {
+            wake = Some(wake.map_or(next, |w| w.min(next)));
+        }
         if let Some(next) = self.step_bursts(now) {
             wake = Some(wake.map_or(next, |w| w.min(next)));
         }
@@ -866,6 +891,7 @@ fn main() {
         bursts: Vec::new(),
         burst_next: Instant::now(),
         burst_frames: 0,
+        presence: Presence::default(),
     };
     app.edit_burst = app.theme.edit_burst(&app.cfg);
     event_loop.run_app(&mut app).expect("run");
