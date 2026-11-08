@@ -3,6 +3,11 @@ name = "vault-wallpaper"
 version = "1.0.0-beta.1"
 edition = "2024"
 
+[features]
+# Sparkle 2 automatic updates for the direct-download build (DMG, Homebrew).
+# packaging/build-app.sh turns it on; the Mac App Store build must leave it off.
+updater = ["objc2-foundation/NSBundle", "objc2-foundation/NSDictionary", "objc2-foundation/NSError", "objc2-foundation/NSString"]
+
 [dependencies]
 block2 = "0.6.2"
 objc2 = "0.6.5"

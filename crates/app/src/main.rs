@@ -24,6 +24,7 @@ mod power;
 mod presence;
 mod settings;
 mod system;
+mod updater;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -234,6 +235,8 @@ struct App {
     /// While away, when to look at visibility again in case a wake was missed.
     away_check: Instant,
     menu: Option<AppMenu>,
+    /// Sparkle, in the direct-download build only (`updater` feature, framework embedded).
+    updater: Option<updater::Updater>,
     /// Open only while the user has it open; closing drops the web view.
     settings: Option<SettingsWindow>,
     /// Paused from the menu: keep the last frame, draw nothing new.
@@ -785,6 +788,13 @@ impl App {
                     m.set_login(desktop::login::enabled());
                 }
             }
+            Action::CheckForUpdates => {
+                if let Some(u) = &self.updater {
+                    // A menu-bar app isn't frontmost: bring Sparkle's window forward.
+                    desktop::activate();
+                    u.check_now();
+                }
+            }
             Action::Quit => event_loop.exit(),
         }
     }
@@ -971,11 +981,17 @@ impl ApplicationHandler<AppEvent> for App {
             }
         }
         let proxy = self.proxy.clone();
-        self.menu = AppMenu::new(desktop::login::enabled(), move |e| {
+        self.updater = updater::Updater::start();
+        self.menu = AppMenu::new(desktop::login::enabled(), self.updater.is_some(), move |e| {
             let _ = proxy.send_event(AppEvent::Menu(e));
         });
         if self.menu.is_none() {
             eprintln!("menu bar icon could not be created");
+        }
+        // Test aid: run the menu's Check for Updates… at launch (scripts can't click a
+        // status-item menu). Inert without the updater.
+        if std::env::var_os("VW_CHECK_FOR_UPDATES").is_some() {
+            self.on_action(Action::CheckForUpdates, event_loop);
         }
         self.start_background();
         if self.vault_path().is_none() {
@@ -1100,6 +1116,7 @@ fn main() {
         span_rect: None,
         _system: None,
         menu: None,
+        updater: None,
         settings: None,
         paused: false,
         edit_burst: None,
