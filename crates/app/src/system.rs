@@ -24,6 +24,8 @@ pub enum SysEvent {
     Space,
     /// Low Power Mode or the power source changed.
     Power,
+    /// A volume mounted or unmounted (the vault may live on it).
+    Mounts,
 }
 
 type Token = Retained<ProtocolObject<dyn NSObjectProtocol>>;
@@ -48,7 +50,8 @@ pub fn observe(send: impl Fn(SysEvent) + Clone + 'static) -> Observers {
     use objc2_app_kit::{
         NSApplicationDidChangeScreenParametersNotification, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification,
         NSWorkspaceScreensDidSleepNotification, NSWorkspaceScreensDidWakeNotification, NSWorkspaceSessionDidBecomeActiveNotification,
-        NSWorkspaceSessionDidResignActiveNotification, NSWorkspaceWillSleepNotification, NSWorkspaceDidWakeNotification,
+        NSWorkspaceSessionDidResignActiveNotification, NSWorkspaceWillSleepNotification, NSWorkspaceDidWakeNotification, NSWorkspaceDidMountNotification,
+        NSWorkspaceDidUnmountNotification,
     };
     use objc2_foundation::NSProcessInfoPowerStateDidChangeNotification;
 
@@ -75,6 +78,8 @@ pub fn observe(send: impl Fn(SysEvent) + Clone + 'static) -> Observers {
         add(&workspace, NSWorkspaceDidWakeNotification, SysEvent::Back);
         add(&workspace, NSWorkspaceSessionDidBecomeActiveNotification, SysEvent::Back);
         add(&workspace, NSWorkspaceActiveSpaceDidChangeNotification, SysEvent::Space);
+        add(&workspace, NSWorkspaceDidMountNotification, SysEvent::Mounts);
+        add(&workspace, NSWorkspaceDidUnmountNotification, SysEvent::Mounts);
         // Screen lock has no public AppKit notification; loginwindow posts these.
         add(&distributed, &NSString::from_str("com.apple.screenIsLocked"), SysEvent::Away);
         add(&distributed, &NSString::from_str("com.apple.screenIsUnlocked"), SysEvent::Back);

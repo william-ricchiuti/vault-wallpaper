@@ -6,7 +6,7 @@
 //! (the web version's format) and are reloaded when the file changes; `--vault`
 //! overrides the vault path.
 //!
-//! Threads: the vault watcher, the config watcher and the layout engine run in the
+//! Threads: the vault scan, the vault watcher, the config watcher and the layout engine run in the
 //! background and post results to the main thread. The main thread redraws the scene
 //! only when something changed, into a new IOSurface shown as a plain layer's contents
 //! (`overlay::SceneLayer`), then frees the full-resolution intermediate textures; glow
@@ -67,14 +67,110 @@ const MAX_BURSTS: usize = 16;
 /// notification that they're back was missed.
 const AWAY_CHECK: Duration = Duration::from_secs(60);
 
+/// How often a missing vault (an unmounted drive, a folder not synced yet) is looked
+/// for again, besides each time a volume mounts.
+const VAULT_RETRY: Duration = Duration::from_secs(60);
+
 enum AppEvent {
-    Graph(Box<Graph>),
+    /// A vault edit, from the watcher of vault open number `.0`.
+    Graph(u64, Box<Graph>),
+    /// Vault open number `generation` (scan and watch) finished in the background.
+    Opened { generation: u64, path: PathBuf, result: Result<Box<OpenedVault>, VaultProblem> },
     Layout(Box<LayoutFrame>),
     Config(Box<Config>),
     Menu(MenuEvent),
     System(SysEvent),
     /// The Obsidian plugin's state file changed (`None`: gone or unreadable).
     Presence(Option<Box<vw_core::presence::PresenceState>>),
+}
+
+/// A vault scanned and watched off the main thread.
+struct OpenedVault {
+    graph: Graph,
+    notes: usize,
+    scan_ms: f64,
+    watcher: Option<VaultWatcher>,
+}
+
+/// Why the vault couldn't be shown.
+#[derive(Debug, Clone, PartialEq)]
+enum VaultProblem {
+    /// The folder isn't there (moved, renamed, an unmounted drive).
+    NotFound,
+    /// It is there but can't be listed.
+    Unreadable(String),
+    /// Sandboxed build: no working permission for it (a hand-edited `vaultPath`).
+    NoAccess,
+}
+
+impl VaultProblem {
+    /// Whether the vault folder can be listed (a cheap check before a full scan).
+    fn check(path: &std::path::Path) -> Result<(), VaultProblem> {
+        match std::fs::read_dir(path) {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(VaultProblem::NotFound),
+            Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => Err(VaultProblem::Unreadable("not a folder".into())),
+            Err(e) => Err(VaultProblem::Unreadable(e.to_string())),
+        }
+    }
+
+    /// The menu's status line for this problem.
+    fn status(&self, path: &std::path::Path) -> String {
+        match self {
+            VaultProblem::NotFound => format!("Vault not found: {}", short_path(path)),
+            VaultProblem::Unreadable(_) => format!("Vault can't be read: {}", short_path(path)),
+            VaultProblem::NoAccess => format!("Choose Vault… to allow access to {}", short_path(path)),
+        }
+    }
+}
+
+/// A path short enough for a menu line: `~` for the home folder, and only the last
+/// two folders of a long path.
+fn short_path(path: &std::path::Path) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let (prefix, rest) = match home.as_deref().and_then(|h| path.strip_prefix(h).ok()) {
+        Some(rest) => ("~/", rest),
+        None => ("/", path.strip_prefix("/").unwrap_or(path)),
+    };
+    let parts: Vec<String> = rest.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    if parts.len() > 2 {
+        format!("…/{}", parts[parts.len() - 2..].join("/"))
+    } else {
+        format!("{prefix}{}", parts.join("/"))
+    }
+}
+
+/// Why a display didn't get its wallpaper window.
+#[derive(Debug)]
+enum ScreenError {
+    Window(String),
+    Surface(String),
+    /// No Metal device (or none that can draw to the window).
+    Gpu,
+}
+
+impl std::fmt::Display for ScreenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScreenError::Window(e) => write!(f, "could not create the window: {e}"),
+            ScreenError::Surface(e) => write!(f, "could not draw into the window: {e}"),
+            ScreenError::Gpu => f.write_str("no usable GPU"),
+        }
+    }
+}
+
+impl ScreenError {
+    /// What the alert says when this leaves the app with nothing to draw on.
+    fn message(&self) -> &'static str {
+        match self {
+            ScreenError::Gpu | ScreenError::Surface(_) => "Vault Wallpaper needs a Mac with Metal graphics.",
+            ScreenError::Window(_) => "Vault Wallpaper couldn't open its wallpaper window.",
+        }
+    }
+
+    fn exit(&self) -> ! {
+        desktop::fatal(self.message(), &self.to_string())
+    }
 }
 
 struct Args {
@@ -89,24 +185,72 @@ fn support_dir() -> PathBuf {
     home.join("Library/Application Support/Vault Wallpaper")
 }
 
+const USAGE: &str = "usage: vault-wallpaper [--vault <path>] [--config <file>] [--front] [--cache <file>]";
+
 fn parse_args() -> Args {
-    let mut args = Args {
+    let defaults = Args {
         vault: std::env::var_os("VW_VAULT").map(PathBuf::from),
         config: config::default_path().unwrap_or_else(|| support_dir().join("config.json")),
         front: false,
         cache: support_dir().join("layout.json"),
     };
-    let mut it = std::env::args().skip(1);
+    match parse_args_from(defaults, std::env::args().skip(1)) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{e}\n{USAGE}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Applies the command line to `args`. A flag missing its value is a usage error.
+fn parse_args_from(mut args: Args, argv: impl IntoIterator<Item = String>) -> Result<Args, String> {
+    let mut it = argv.into_iter();
+    let value = |flag: &str, it: &mut dyn Iterator<Item = String>| match it.next() {
+        Some(v) if !v.is_empty() && !v.starts_with("--") => Ok(PathBuf::from(v)),
+        _ => Err(format!("{flag} needs a path")),
+    };
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--vault" => args.vault = it.next().map(PathBuf::from),
-            "--config" => args.config = it.next().map(PathBuf::from).expect("--config needs a path"),
+            "--vault" => args.vault = Some(value("--vault", &mut it)?),
+            "--config" => args.config = value("--config", &mut it)?,
             "--front" => args.front = true,
-            "--cache" => args.cache = it.next().map(PathBuf::from).expect("--cache needs a path"),
+            "--cache" => args.cache = value("--cache", &mut it)?,
             other => eprintln!("unknown argument: {other}"),
         }
     }
-    args
+    Ok(args)
+}
+
+/// Checks, scans and watches the vault at `path` (on a background thread). The
+/// watcher's edits are tagged with `generation`.
+fn open_in_background(
+    path: &std::path::Path,
+    opts: vw_core::vault::VaultOptions,
+    generation: u64,
+    proxy: &EventLoopProxy<AppEvent>,
+) -> Result<Box<OpenedVault>, VaultProblem> {
+    VaultProblem::check(path)?;
+    let t = Instant::now();
+    let vault = Vault::scan(path, opts);
+    let scan_ms = t.elapsed().as_secs_f64() * 1000.0;
+    if vault.is_empty() {
+        // Gone between the check and the scan.
+        VaultProblem::check(path)?;
+    }
+    let notes = vault.len();
+    let graph = vault.graph();
+    let proxy = proxy.clone();
+    let watcher = match watch(vault, move |g| {
+        let _ = proxy.send_event(AppEvent::Graph(generation, Box::new(g)));
+    }) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            eprintln!("not watching the vault: {e}");
+            None
+        }
+    };
+    Ok(Box::new(OpenedVault { graph, notes, scan_ms, watcher }))
 }
 
 fn load_config(path: &std::path::Path) -> Config {
@@ -200,6 +344,8 @@ impl Screen {
 
 /// The graph a layout frame belongs to, with its look.
 struct Shown {
+    /// The layout generation of `graph` (frames of one generation share the graph).
+    generation: u64,
     graph: Graph,
     layout: LayoutGraph,
     look: Look,
@@ -222,6 +368,12 @@ struct App {
     shown: Option<Shown>,
     engine: Option<LayoutEngine>,
     _vault_watcher: Option<VaultWatcher>,
+    /// Counts vault opens; results and edits from an older open are dropped.
+    vault_gen: u64,
+    /// The vault couldn't be shown: when to look for it again.
+    vault_retry: Option<Instant>,
+    /// The menu's status line says something about the vault (cleared once it loads).
+    vault_status: bool,
     _config_watcher: Option<ConfigWatcher>,
     started: Instant,
     /// Low Power Mode and the power source, kept current by notifications.
@@ -298,6 +450,8 @@ impl App {
     fn open_vault_or_ask(&mut self, ask: bool) {
         self._vault_watcher = None;
         self.presence = Presence::default();
+        self.vault_retry = None;
+        self.vault_gen += 1;
         let Some(path) = self.vault_path() else {
             eprintln!("no vault set: pass --vault or set vaultPath in {}", self.args.config.display());
             self.vault_access = None;
@@ -312,32 +466,91 @@ impl App {
                     if ask {
                         let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
                         self.choose_vault(Some(&path), &format!("Allow Vault Wallpaper to read “{name}”: select it and click Open"));
+                    } else {
+                        // Not from a background reload: the user picks it from the menu.
+                        self.vault_problem(&path, VaultProblem::NoAccess);
                     }
                     return;
                 }
             }
         }
-        let t = Instant::now();
-        let vault = Vault::scan(&path, self.cfg.vault_options());
-        eprintln!("[{:.0} ms] scanned {} notes in {:.0} ms", self.ms(), vault.len(), t.elapsed().as_secs_f64() * 1000.0);
-        let graph = vault.graph();
+        // Scanning a big vault and arming its watcher take a while: off the main
+        // thread, so the menu stays responsive. The graph comes back as an event.
+        let generation = self.vault_gen;
+        let opts = self.cfg.vault_options();
         let proxy = self.proxy.clone();
-        match watch(vault, move |g| {
-            let _ = proxy.send_event(AppEvent::Graph(Box::new(g)));
-        }) {
-            Ok(w) => self._vault_watcher = Some(w),
-            Err(e) => eprintln!("not watching the vault: {e}"),
-        }
-        self.send_graph(graph);
-        let proxy = self.proxy.clone();
-        self.presence = Presence::start(&path, move |s| {
-            let _ = proxy.send_event(AppEvent::Presence(s.map(Box::new)));
+        let spawned = std::thread::Builder::new().name("vault-open".into()).spawn(move || {
+            let result = open_in_background(&path, opts, generation, &proxy);
+            let _ = proxy.send_event(AppEvent::Opened { generation, path, result });
         });
+        if let Err(e) = spawned {
+            eprintln!("could not start the vault scan: {e}");
+        }
+    }
+
+    /// The background open's result.
+    fn on_opened(&mut self, generation: u64, path: PathBuf, result: Result<Box<OpenedVault>, VaultProblem>) {
+        if generation != self.vault_gen {
+            return;
+        }
+        match result {
+            Ok(opened) => {
+                let OpenedVault { graph, notes, scan_ms, watcher } = *opened;
+                eprintln!("[{:.0} ms] scanned {notes} notes in {scan_ms:.0} ms", self.ms());
+                self._vault_watcher = watcher;
+                self.vault_retry = None;
+                if self.vault_status {
+                    self.vault_status = false;
+                    if let Some(m) = &self.menu {
+                        m.set_status("Vault Wallpaper");
+                    }
+                }
+                self.send_graph(graph);
+                let proxy = self.proxy.clone();
+                self.presence = Presence::start(&path, move |s| {
+                    let _ = proxy.send_event(AppEvent::Presence(s.map(Box::new)));
+                });
+            }
+            Err(problem) => self.vault_problem(&path, problem),
+        }
+    }
+
+    /// Says on the menu why the vault isn't shown, and looks for it again later (and
+    /// whenever a volume mounts). The last picture stays up meanwhile.
+    fn vault_problem(&mut self, path: &std::path::Path, problem: VaultProblem) {
+        let status = problem.status(path);
+        eprintln!("[{:.0} ms] {status} ({problem:?}); retrying every {} s and on mount", self.ms(), VAULT_RETRY.as_secs());
+        self._vault_watcher = None;
+        self.presence = Presence::default();
+        if let Some(m) = &self.menu {
+            m.set_status(&status);
+        }
+        self.vault_status = true;
+        self.vault_retry = Some(Instant::now() + VAULT_RETRY);
+    }
+
+    /// The vault is missing and a volume mounted, or the retry timer is due.
+    fn retry_vault(&mut self) {
+        if self.vault_retry.is_some() {
+            eprintln!("[{:.0} ms] looking for the vault again", self.ms());
+            self.open_vault_or_ask(false);
+        }
     }
 
     /// A graph from the vault watcher: an edit. Notes it saved are remembered, and
     /// their bursts start once the layout frame that shows this graph arrives.
-    fn on_graph(&mut self, graph: Graph) {
+    fn on_graph(&mut self, generation: u64, graph: Graph) {
+        if generation != self.vault_gen {
+            return;
+        }
+        if graph.nodes.is_empty()
+            && let Some(path) = self.vault_path()
+            && let Err(problem) = VaultProblem::check(&path)
+        {
+            // Unmounted or moved away while watched: keep the last picture and say so.
+            self.vault_problem(&path, problem);
+            return;
+        }
         eprintln!("[{:.0} ms] vault changed: {} notes", self.ms(), graph.nodes.len());
         // While the Obsidian plugin is live, its save reports start the bursts instead.
         if self.edit_burst.is_some()
@@ -377,21 +590,26 @@ impl App {
         }
         self.sent.drain(..index);
         self.sent_base += index as u64;
-        let (graph, layout) = &self.sent[0];
-        if layout.len() != frame.positions.len() {
+        if self.sent[0].1.len() != frame.positions.len() {
             return;
         }
         if frame.settled {
             eprintln!("[{:.0} ms] layout settled", self.ms());
         }
-        // The look only depends on the graph and config: reuse it while positions move.
-        let same_graph = self.shown.as_ref().is_some_and(|s| s.layout.id == layout.id && s.layout.links == layout.links);
-        let (graph, layout) = (graph.clone(), layout.clone());
-        let look = match self.shown.take() {
-            Some(s) if same_graph => s.look,
-            _ => self.look_for(&graph, &layout),
-        };
-        self.shown = Some(Shown { graph, layout, look, positions: frame.positions });
+        self.shown = Some(match self.shown.take() {
+            // Another frame of the graph on screen: only the positions move.
+            Some(s) if s.generation == frame.generation => Shown { positions: frame.positions, ..s },
+            old => {
+                let (graph, layout) = (self.sent[0].0.clone(), self.sent[0].1.clone());
+                // The look only depends on the graph and config: reuse it while the
+                // notes and links are the same.
+                let look = match old {
+                    Some(s) if s.layout.id == layout.id && s.layout.links == layout.links => s.look,
+                    _ => self.look_for(&graph, &layout),
+                };
+                Shown { generation: frame.generation, graph, layout, look, positions: frame.positions }
+            }
+        });
         self.send_tags();
         self.invalidate_scene();
         self.start_bursts(frame.generation);
@@ -463,7 +681,8 @@ impl App {
             self.shown = Some(Shown { look, ..s });
         }
         if vault_changed {
-            self.open_vault();
+            // A background reload never pops the folder picker; the menu says what to do.
+            self.open_vault_or_ask(false);
         }
         self.invalidate_scene();
         if let Some(s) = &self.settings {
@@ -524,7 +743,8 @@ impl App {
         }
     }
 
-    fn add_screen(&mut self, event_loop: &ActiveEventLoop, geom: Geom) {
+    /// Opens the wallpaper window for one display. The first window also picks the GPU.
+    fn add_screen(&mut self, event_loop: &ActiveEventLoop, geom: Geom) -> Result<(), ScreenError> {
         let attrs = Window::default_attributes()
             .with_title("Vault Wallpaper")
             .with_decorations(false)
@@ -533,7 +753,7 @@ impl App {
             .with_inner_size(LogicalSize::new(geom.w, geom.h))
             .with_has_shadow(false)
             .with_active(false);
-        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+        let window = Arc::new(event_loop.create_window(attrs).map_err(|e| ScreenError::Window(e.to_string()))?);
         let size = window.inner_size();
         let ns_window = desktop::ns_window(&window);
         if let (Some(w), false) = (&ns_window, self.args.front) {
@@ -543,11 +763,13 @@ impl App {
             Some(g) => g.instance.clone(),
             None => wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle()),
         };
-        let surface = instance.create_surface(window.clone()).expect("surface");
+        let surface = instance.create_surface(window.clone()).map_err(|e| ScreenError::Surface(e.to_string()))?;
         if self.gpu.is_none() {
-            self.gpu = Some(Gpu::new(Some(&surface), instance).expect("no usable GPU"));
+            // Test aid: VW_FAIL_GPU=1 takes the no-GPU path on any Mac.
+            let gpu = if std::env::var_os("VW_FAIL_GPU").is_some() { None } else { Gpu::new(Some(&surface), instance) };
+            self.gpu = Some(gpu.ok_or(ScreenError::Gpu)?);
         }
-        let gpu = self.gpu.as_ref().unwrap();
+        let Some(gpu) = self.gpu.as_ref() else { return Err(ScreenError::Gpu) };
         let caps = surface.get_capabilities(&gpu.adapter);
         let format = preferred_format(&caps.formats);
         let config = wgpu::SurfaceConfiguration {
@@ -590,6 +812,18 @@ impl App {
             scene_layer,
             bursts_dirty: false,
         });
+        Ok(())
+    }
+
+    /// [`add_screen`](Self::add_screen), where a failure is logged and the app carries
+    /// on with the screens it has. Without a GPU there is nothing to carry on with.
+    fn try_add_screen(&mut self, event_loop: &ActiveEventLoop, geom: Geom) {
+        if let Err(e) = self.add_screen(event_loop, geom) {
+            eprintln!("[{:.0} ms] display {}: {e}", self.ms(), geom.id);
+            if self.gpu.is_none() {
+                e.exit();
+            }
+        }
     }
 
     fn draw(&mut self, id: WindowId) {
@@ -894,7 +1128,7 @@ impl App {
             eprintln!("[{:.0} ms] display change: {change:?}", self.ms());
             match change {
                 displays::Change::Remove(id) => self.screens.retain(|s| s.geom.id != id),
-                displays::Change::Add(geom) => self.add_screen(event_loop, geom),
+                displays::Change::Add(geom) => self.try_add_screen(event_loop, geom),
                 displays::Change::Update(geom) => {
                     let Some(gpu) = &self.gpu else { continue };
                     let Some(s) = self.screens.iter_mut().find(|s| s.geom.id == geom.id) else { continue };
@@ -952,6 +1186,16 @@ impl App {
                 eprintln!("[{:.0} ms] space changed", self.ms());
                 self.recheck_visibility();
             }
+            SysEvent::Mounts => {
+                if self.vault_retry.is_some() {
+                    self.retry_vault();
+                } else if let Some(path) = self.vault_path()
+                    && self._vault_watcher.is_some()
+                    && let Err(problem) = VaultProblem::check(&path)
+                {
+                    self.vault_problem(&path, problem);
+                }
+            }
             SysEvent::Power => {
                 let power = PowerState::read();
                 if power != self.power {
@@ -1006,8 +1250,19 @@ impl ApplicationHandler<AppEvent> for App {
         if !self.screens.is_empty() {
             return;
         }
+        let mut failed = None;
         for geom in displays::monitors(event_loop) {
-            self.add_screen(event_loop, geom);
+            if let Err(e) = self.add_screen(event_loop, geom) {
+                eprintln!("[{:.0} ms] display {}: {e}", self.ms(), geom.id);
+                if self.gpu.is_none() {
+                    e.exit();
+                }
+                failed = Some(e);
+            }
+        }
+        if let (Some(e), true) = (failed, self.screens.is_empty()) {
+            // Displays, but not one window on them.
+            e.exit();
         }
         self.update_span();
         eprintln!(
@@ -1051,7 +1306,8 @@ impl ApplicationHandler<AppEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
-            AppEvent::Graph(g) => self.on_graph(*g),
+            AppEvent::Graph(generation, g) => self.on_graph(generation, *g),
+            AppEvent::Opened { generation, path, result } => self.on_opened(generation, path, result),
             AppEvent::Layout(f) => self.on_layout(*f),
             AppEvent::Config(c) => self.on_config(*c),
             AppEvent::Presence(s) => self.on_presence(s.map(|s| *s)),
@@ -1122,6 +1378,14 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
         }
+        if let Some(at) = self.vault_retry {
+            if now >= at {
+                self.retry_vault();
+            }
+            if let Some(at) = self.vault_retry {
+                wake = Some(wake.map_or(at, |w| w.min(at)));
+            }
+        }
         if let Some(next) = self.step_presence() {
             wake = Some(wake.map_or(next, |w| w.min(next)));
         }
@@ -1141,7 +1405,7 @@ fn main() {
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .with_activation_policy(ActivationPolicy::Accessory)
         .build()
-        .expect("event loop");
+        .unwrap_or_else(|e| desktop::fatal("Vault Wallpaper couldn't start.", &e.to_string()));
     let mut app = App {
         proxy: event_loop.create_proxy(),
         theme: Theme::from_config(&cfg),
@@ -1156,6 +1420,9 @@ fn main() {
         shown: None,
         engine: None,
         _vault_watcher: None,
+        vault_gen: 0,
+        vault_retry: None,
+        vault_status: false,
         _config_watcher: None,
         started: Instant::now(),
         power: PowerState::read(),
@@ -1176,5 +1443,69 @@ fn main() {
         vault_access: None,
     };
     app.edit_burst = app.theme.edit_burst(&app.cfg);
-    event_loop.run_app(&mut app).expect("run");
+    if let Err(e) = event_loop.run_app(&mut app) {
+        desktop::fatal("Vault Wallpaper stopped unexpectedly.", &e.to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn defaults() -> Args {
+        Args { vault: None, config: "/c.json".into(), front: false, cache: "/l.json".into() }
+    }
+
+    fn parse(argv: &[&str]) -> Result<Args, String> {
+        parse_args_from(defaults(), argv.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn parses_flags() {
+        let a = parse(&["--vault", "/v", "--front", "--config", "/x.json", "--cache", "/y.json"]).unwrap();
+        assert_eq!(a.vault.as_deref(), Some(std::path::Path::new("/v")));
+        assert!(a.front);
+        assert_eq!(a.config, PathBuf::from("/x.json"));
+        assert_eq!(a.cache, PathBuf::from("/y.json"));
+        let a = parse(&[]).unwrap();
+        assert_eq!((a.vault, a.config, a.front), (None, PathBuf::from("/c.json"), false));
+    }
+
+    #[test]
+    fn a_flag_without_its_value_is_a_usage_error() {
+        assert_eq!(parse(&["--config"]).err().as_deref(), Some("--config needs a path"));
+        assert_eq!(parse(&["--cache"]).err().as_deref(), Some("--cache needs a path"));
+        assert_eq!(parse(&["--vault"]).err().as_deref(), Some("--vault needs a path"));
+        assert_eq!(parse(&["--config", "--front"]).err().as_deref(), Some("--config needs a path"));
+        assert_eq!(parse(&["--cache", ""]).err().as_deref(), Some("--cache needs a path"));
+    }
+
+    #[test]
+    fn short_paths_for_the_menu() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(short_path(&PathBuf::from(&home).join("Vault")), "~/Vault");
+        assert_eq!(short_path(&PathBuf::from(&home).join("Documents/Vault")), "~/Documents/Vault");
+        assert_eq!(short_path(&PathBuf::from(&home).join("Library/Mobile Documents/iCloud~md~obsidian/Documents/Notes")), "…/Documents/Notes");
+        assert_eq!(short_path(std::path::Path::new("/Volumes/USB")), "/Volumes/USB");
+        assert_eq!(short_path(std::path::Path::new("/Volumes/USB/Notes/Work")), "…/Notes/Work");
+    }
+
+    #[test]
+    fn vault_problems() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(VaultProblem::check(dir.path()), Ok(()));
+        let missing = dir.path().join("gone");
+        assert_eq!(VaultProblem::check(&missing), Err(VaultProblem::NotFound));
+        let file = dir.path().join("note.md");
+        std::fs::write(&file, "").unwrap();
+        assert!(matches!(VaultProblem::check(&file), Err(VaultProblem::Unreadable(_))));
+        assert_eq!(VaultProblem::NotFound.status(std::path::Path::new("/Volumes/USB")), "Vault not found: /Volumes/USB");
+    }
+
+    #[test]
+    fn no_gpu_says_metal() {
+        assert_eq!(ScreenError::Gpu.message(), "Vault Wallpaper needs a Mac with Metal graphics.");
+        assert_eq!(ScreenError::Surface("x".into()).message(), "Vault Wallpaper needs a Mac with Metal graphics.");
+        assert!(ScreenError::Window("x".into()).message().contains("window"));
+    }
 }

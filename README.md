@@ -36,6 +36,17 @@ don't have to lay it out again.
 New installs start still: the picture only changes when your notes do. Motion (glow that
 breathes, edit effects) is opt-in in Settings.
 
+If the vault folder isn't there (an unplugged drive, a folder that was moved), the menu's top
+line says **Vault not found** and the app looks for it again when a drive is mounted and every
+minute until it's back.
+
+**iCloud Drive vaults:** with *Optimize Mac Storage* on, macOS may move notes you haven't opened
+in a while to iCloud, leaving `.Note.md.icloud` placeholders. Vault Wallpaper doesn't download
+files, so those notes aren't shown until they're downloaded again. To keep the whole vault on
+your Mac, right-click the vault folder in Finder and choose **Keep Downloaded** (macOS 15 and
+later), or turn off *Optimize Mac Storage* in System Settings → Apple Account → iCloud →
+iCloud Drive.
+
 Used the web version (obsidian-live-wallpaper)? Choose **Import Web Version Settings…** in the
 menu to bring your old `config.json` and custom presets over. See
 [Migrating from the web version](docs/migrating-from-web.md).
@@ -48,7 +59,7 @@ menu to bring your old `config.json` and custom presets over. See
 | Settings… | Themes, presets, colours, labels, layout and motion. Changes apply as you make them. |
 | Choose Vault… | Switch to another vault. |
 | Import Web Version Settings… | Read a `config.json` from the web version. |
-| Export PNG | Saves the current picture to `~/Pictures/Vault Wallpaper/` and shows it in Finder. |
+| Export PNG | Saves the current picture to `~/Pictures/Vault Wallpaper/` and shows it in Finder. With several displays, it saves the first display's picture. |
 | Open Config File | Opens `config.json` in your text editor; edits apply when you save. |
 | Start at Login | Opens Vault Wallpaper when you log in. |
 | Check for Updates… | Looks for a newer version now (DMG and Homebrew installs; the App Store updates its own copy). |
@@ -61,10 +72,11 @@ menu to bring your old `config.json` and custom presets over. See
 | **Night Sky** | Notes as stars, your busiest notes as the brightest, tags as constellations. |
 | **Aurora Lite** | Soft aurora curtains rising over your biggest tag clusters. |
 | **Ink & Paper** | A printed plate: ink on warm paper. With motion on, saving a note makes its ink bleed for a moment. |
+| **Pulse** | A calm, still graph on dark slate. With motion on, saving a note sends light out along its links, hop by hop, then everything is still again. |
 
-| Night Sky | Aurora Lite | Ink & Paper |
-|---|---|---|
-| ![Night Sky](docs/phase6/night-sky.png) | ![Aurora Lite](docs/phase6/aurora-lite.png) | ![Ink & Paper](docs/phase6/ink-paper.png) |
+| Night Sky | Aurora Lite | Ink & Paper | Pulse |
+|---|---|---|---|
+| ![Night Sky](docs/phase6/night-sky.png) | ![Aurora Lite](docs/phase6/aurora-lite.png) | ![Ink & Paper](docs/phase6/ink-paper.png) | ![Pulse](docs/phase6/pulse.png) |
 
 Pick a theme or preset in **Settings…**. You can save your own presets there too.
 
@@ -105,9 +117,10 @@ Its own files are:
 ## Light on your Mac
 
 It draws only when something changes. With the wallpaper covered by windows, or still, it
-draws nothing. Measured on a 2,600-note vault (1.0 beta, MacBook Air display): about 0.2% CPU
-and a 97 MB memory footprint at idle after a launch from the cached layout; the very first
-run, which lays the graph out from scratch, settles at about 130 MB.
+draws nothing. Measured on 2026-11-07 (1.0 beta, M3 Pro, 3024×1964 Retina display): about a
+52–55 MB memory footprint at idle. A redraw (a note edited, a setting or theme changed)
+briefly uses more while the graphics driver works, then the app is back at its idle footprint
+within a few seconds.
 
 ## Uninstall
 
