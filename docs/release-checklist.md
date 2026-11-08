@@ -63,9 +63,14 @@ packaging/sparkle-keys.sh        # added by the Sparkle work; wraps Sparkle's ge
 ```
 
 It keeps the private key in the login keychain, which local `release.sh` runs and
-`make-appcast.sh` use, and prints the public key for the app's `SUPublicEDKey`. For CI and
-as a backup, export the private key to a file (Sparkle's `generate_keys -x <file>`). Keep the
-file in your password manager, not in the repo.
+`make-appcast.sh` use, and prints the public key. Put that public key in
+`packaging/sparkle.env` (`SPARKLE_PUBLIC_ED_KEY=...`) and commit it: `build-app.sh` writes it
+into the app's `SUPublicEDKey`. Until then, builds leave the updater switched off and the menu
+has no Check for Updates….
+
+For CI and as a backup, export the private key to a file
+(`packaging/sparkle-keys.sh -x ~/sparkle-key.txt`, or Sparkle's `generate_keys -x <file>`). Keep
+the file in your password manager, not in the repo, then delete it.
 
 ### A4. Make the repository public **[William]**
 
