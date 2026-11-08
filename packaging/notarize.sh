@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# Notarize a signed DMG (or zip) with Apple and staple the ticket to it.
+# Notarize a signed app or DMG with Apple and staple the ticket to it.
 #
 # Usage: VW_NOTARY_PROFILE=vault-wallpaper-notary packaging/notarize.sh [file]
-#   file defaults to the newest dist/*.dmg.
+#   file  a .app: zipped with `ditto -c -k --keepParent`, the zip submitted, and the ticket
+#         stapled to the .app itself, so the app passes Gatekeeper offline once it's copied
+#         out of the DMG (or installed by Homebrew, or replaced by Sparkle).
+#         a .dmg (or .pkg): submitted and stapled as it is.
+#   Defaults to the newest dist/*.dmg. release.sh calls it twice: on the signed app before
+#   make-dmg.sh, then on the DMG.
 #
 # Or, with an App Store Connect API key instead of a keychain profile (what CI uses):
 #   VW_NOTARY_KEY_PATH=AuthKey_XXXX.p8 VW_NOTARY_KEY_ID=XXXX VW_NOTARY_ISSUER=<uuid> \
@@ -48,23 +53,38 @@ MSG
 fi
 
 FILE="${1:-}"
+FILE="${FILE%/}"
 if [[ -z "$FILE" ]]; then
   FILE="$(ls -t "$ROOT"/dist/*.dmg 2>/dev/null | head -n 1 || true)"
 fi
-if [[ -z "$FILE" || ! -f "$FILE" ]]; then
+if [[ -z "$FILE" || ! -e "$FILE" ]]; then
   echo "error: nothing to notarize; run build-app.sh, sign.sh and make-dmg.sh first" >&2
   exit 1
 fi
 
-echo "==> submitting $FILE ($AUTH_DESC); this usually takes a few minutes"
-xcrun notarytool submit "$FILE" "${AUTH[@]}" --wait
+SUBMIT="$FILE"
+if [[ "$FILE" == *.app ]]; then
+  [[ -d "$FILE" ]] || { echo "error: $FILE is not an app bundle" >&2; exit 1; }
+  ZIPDIR="$(mktemp -d "${TMPDIR:-/tmp}/vw-notarize.XXXXXX")"
+  trap 'rm -rf "$ZIPDIR"' EXIT
+  SUBMIT="$ZIPDIR/$(basename "$FILE" .app).zip"
+  echo "==> zipping $(basename "$FILE") for upload"
+  ditto -c -k --keepParent "$FILE" "$SUBMIT"
+fi
+
+echo "==> submitting $SUBMIT ($AUTH_DESC); this usually takes a few minutes"
+xcrun notarytool submit "$SUBMIT" "${AUTH[@]}" --wait
 # If it reports "Invalid", fetch the reason with:
 #   xcrun notarytool log <submission-id> --keychain-profile "$VW_NOTARY_PROFILE"
 
-echo "==> stapling"
+echo "==> stapling $FILE"
 xcrun stapler staple "$FILE"
 xcrun stapler validate "$FILE"
 
 echo "==> Gatekeeper check"
-spctl --assess --type open --context context:primary-signature --verbose=2 "$FILE" || true
+if [[ "$FILE" == *.app ]]; then
+  spctl --assess --type execute --verbose=2 "$FILE" || true
+else
+  spctl --assess --type open --context context:primary-signature --verbose=2 "$FILE" || true
+fi
 echo "==> notarized and stapled: $FILE"

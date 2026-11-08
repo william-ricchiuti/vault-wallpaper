@@ -10,7 +10,8 @@
 # Set it empty (VW_FEATURES=) for the Mac App Store build: no updater, no framework.
 # Sparkle is embedded whenever the list contains `updater`.
 # Env: VW_SPARKLE_FEED_URL / VW_SPARKLE_PUBLIC_KEY override SUFeedURL / SUPublicEDKey
-#      (packaging/sparkle.env has the release values); VW_VERSION overrides the version.
+#      (packaging/sparkle.env has the release values); VW_VERSION overrides the version;
+#      VW_BUILD_NUMBER / VW_BUILD_FROM_ANY_COMMIT: see packaging/build-number.sh.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -35,10 +36,12 @@ if [[ -z "$VERSION" ]]; then
 fi
 # Info.plist wants plain numbers: CFBundleShortVersionString is the semver core
 # ("1.0.0-beta.1" -> "1.0.0") and CFBundleVersion a build number that only goes up
-# (VW_BUILD_NUMBER, else the commit count). The full version goes in VWVersion, which
-# make-dmg.sh uses for the file name.
+# (VW_BUILD_NUMBER, else the commit count, checked by build-number.sh). The full version goes
+# in VWVersion, which make-dmg.sh uses for the file name.
 SHORT_VERSION="${VERSION%%[-+]*}"
-BUILD_NUMBER="${VW_BUILD_NUMBER:-$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)}"
+# shellcheck source=build-number.sh
+source "$ROOT/packaging/build-number.sh"
+vw_build_number "$ROOT" || exit 1
 FEATURE_LIST="${VW_FEATURES-updater}"
 FEATURES=()
 [[ -n "$FEATURE_LIST" ]] && FEATURES=(--features "$FEATURE_LIST")
@@ -105,6 +108,9 @@ if [[ "$UPDATER" == 1 ]]; then
 	<integer>86400</integer>"
 fi
 
+# Licences of everything compiled into the binary, plus Sparkle's (packaging/notices.sh).
+cp "$ROOT/THIRD-PARTY-NOTICES.txt" "$APP/Contents/Resources/THIRD-PARTY-NOTICES.txt"
+
 # Icon: PNG -> .iconset -> .icns. The PNG is drawn by
 # `cargo run --release -p vw-render --example app_icon -- packaging/icon/icon-1024.png`.
 ICON_PNG="$ROOT/packaging/icon/icon-1024.png"
@@ -162,7 +168,7 @@ $SPARKLE_KEYS
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>LSApplicationCategoryType</key>
-	<string>public.app-category.utilities</string>
+	<string>public.app-category.productivity</string>
 </dict>
 </plist>
 PLIST

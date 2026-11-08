@@ -112,7 +112,23 @@ run, which lays the graph out from scratch, settles at about 130 MB.
 ## Uninstall
 
 Quit it from the menu, untick Start at Login first if you turned it on, and move the app to the
-Bin. To remove its settings too, delete `~/Library/Application Support/Vault Wallpaper/`.
+Bin. With Homebrew, `brew uninstall --cask vault-wallpaper` does both (`--zap` also removes
+everything below).
+
+To remove its settings and caches too, delete:
+
+- `~/Library/Application Support/Vault Wallpaper/` (settings, layout cache, custom presets)
+- `~/Library/Caches/com.williamricchiuti.vaultwallpaper/` (including the updater's downloads)
+- `~/Library/Preferences/com.williamricchiuti.vaultwallpaper.plist` (update-check preferences)
+- `~/Library/HTTPStorages/com.williamricchiuti.vaultwallpaper/`,
+  `~/Library/WebKit/com.williamricchiuti.vaultwallpaper/` and
+  `~/Library/Saved Application State/com.williamricchiuti.vaultwallpaper.savedState/`, if present
+
+Images you exported in `~/Pictures/Vault Wallpaper/` are yours and stay.
+
+Licences of the open-source code inside the app are in
+[THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt), also shipped in the app
+(`Contents/Resources`) and the DMG.
 
 ## Build from source
 

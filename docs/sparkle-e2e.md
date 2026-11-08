@@ -104,10 +104,73 @@ Run 3 used exact process matching.
 Screenshots (update found, ready to install, bad signature rejected) are in the session
 notes folder of the 2026-11-08 sessions, not in the repo.
 
+## Scheduled check (no menu click), 2026-11-08
+
+The app has no Dock icon, so the question was whether an update found by Sparkle's own
+daily check gets noticed. `crates/app/src/updater.rs` now passes Sparkle a user-driver
+delegate (`VWSparkleUserDriverDelegate`): `supportsGentleScheduledUpdateReminders` returns
+YES, and `standardUserDriverWillHandleShowingUpdate:forUpdate:state:` activates the app, so
+Sparkle's window comes to the front.
+
+Same builds, key and localhost feed as above (`test1` build 9001, `test2` build 9002), plus:
+
+- **Prefs by path.** This Mac has an App Store sandbox container for the same bundle id
+  (`~/Library/Containers/com.williamricchiuti.vaultwallpaper`, from the App Store tests).
+  With it, `defaults write com.williamricchiuti.vaultwallpaper …` writes the *container's*
+  prefs, which the unsandboxed direct build never reads, and the check silently doesn't
+  happen. Write to the file path instead:
+
+  ```bash
+  P=~/Library/Preferences/com.williamricchiuti.vaultwallpaper.plist
+  defaults write "$P" SUEnableAutomaticChecks -bool true
+  defaults write "$P" SUScheduledCheckInterval -int 60
+  defaults write "$P" SULastCheckTime -date "2001-01-01 00:00:00 +0000"   # makes a check due now
+  ```
+
+- **Settings kept apart with flags instead of `HOME`.** `--config` and `--cache` keep the
+  real settings untouched (an overridden `HOME` wasn't needed and wasn't tested with the
+  path-based prefs):
+
+  ```bash
+  open -n --stderr app.err "install/Vault Wallpaper.app" --args \
+    --vault "$PWD/vault" --config "$PWD/home/config.json" --cache "$PWD/home/layout.json"
+  ```
+
+- No `VW_CHECK_FOR_UPDATES`: the check is Sparkle's scheduled one.
+
+Result (`run-old.log`):
+
+```
+16:02:58 launch test1 (build 9001), no VW_CHECK_FOR_UPDATES
+16:02:59 GET /appcast.xml 200                          (scheduled check, 1 s after launch)
+16:03:00 window "Software Update": "Vault Wallpaper 1.0.0 (9002) is now available—you have 1.0.0 (9001)."
+         app stderr: "updates: a scheduled check found an update; showing it" (the delegate)
+         CGWindowList, front to back: 0 Vault Wallpaper 'Software Update', 1 Claude, 2 Docker Desktop
+16:03:37 click "Install Update"; GET /Vault-Wallpaper-1.0.0-test2.dmg 200
+16:03:38 click "Install and Relaunch"
+16:03:44 relaunched: new pid; bundle is now 1.0.0-test2, build 9002; codesign --verify --deep --strict OK
+```
+
+The update window was the frontmost window on screen, above the app the user was in.
+System Events still reported that other app (Claude) as the frontmost *process*: macOS 14+
+treats `activateIgnoringOtherApps:` as a request and doesn't take keyboard focus from the
+user's app, but the window is in front where it can be seen.
+
+**`SUScheduledCheckInterval` 60 is clamped.** A second run with `SULastCheckTime` set to
+the launch time and the interval at 60 made no request in 150 s: release builds of Sparkle
+don't check more often than once an hour, whatever the setting. To test a scheduled check,
+make one due by setting `SULastCheckTime` in the past, as above.
+
+**Feed history.** `make-appcast.sh` run twice into the same `--out` (test1's DMG, then
+test2's) kept both items, newest first, each with its own `sparkle:edSignature`: starting a
+release's appcast from the published feed keeps older versions in it.
+
 ## Cleanup after a run
 
 Sparkle keeps its download and installer state in
 `~/Library/Caches/com.williamricchiuti.vaultwallpaper/org.sparkle-project.Sparkle/`. The
-test also uses the real preferences domain `com.williamricchiuti.vaultwallpaper` (cfprefsd
-ignores `HOME`). Remove any `SU*` keys the test leaves there with
-`defaults delete com.williamricchiuti.vaultwallpaper <key>`.
+test also uses the real preferences file `~/Library/Preferences/com.williamricchiuti.vaultwallpaper.plist`.
+Remove the `SU*` keys the test leaves there (`SUEnableAutomaticChecks`,
+`SUScheduledCheckInterval`, `SULastCheckTime`, `SUHasLaunchedBefore`,
+`SUUpdateGroupIdentifier`) with `defaults delete "$P" <key>`, by path as above. Both were
+cleaned after the 2026-11-08 scheduled run.
