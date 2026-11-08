@@ -415,6 +415,42 @@ presenting from this process. Bursts still wake the copy pool (the bake reads it
 with a copy), and so does a text change that rasterises new glyphs (glyphon's
 `write_texture`).
 
+#### Start-up and large vaults (2026-11-08, branch `claude/fix-robustness-bdc555`)
+Pre-release audit items S7, S8 and S11.
+- **No GPU, no window:** creating the window, its surface, the GPU, the event loop, and the
+  run itself no longer panic. With nothing to draw on, an `NSAlert` says "Vault Wallpaper
+  needs a Mac with Metal graphics." and the app exits 1 (`VW_FAIL_GPU=1` forces that path;
+  `VW_NO_ALERT=1` skips the alert). A display added later that fails is logged and the app
+  keeps the screens it has. `--config` / `--cache` / `--vault` without a value is a usage
+  error (exit 2).
+- **Missing vault:** the menu's top line says "Vault not found: <short path>" (or "can't be
+  read", or in the sandbox "Choose Vault… to allow access to …" instead of a modal picker
+  from a background config reload). It looks again on `NSWorkspaceDidMount/Unmount` and every
+  60 s, only while missing, and clears the line once the vault loads. A watched vault that
+  empties because its folder went away (unmount) keeps the last picture and shows the line.
+- **Big vaults:** the scan and the watcher set-up run on a background thread and post the
+  graph back; the main thread no longer blocks for them. The Obsidian plugin watch is one
+  non-recursive folder (the plugin's, or its deepest existing parent, moving as folders
+  appear) instead of the whole vault recursively. Both watchers use `NoCache`: the default
+  file-id cache walked the whole tree once per watch. A settling layout frame of the same
+  graph reuses the shown graph instead of cloning `Graph` and `LayoutGraph` per frame.
+
+**Measured** (`--front`, default config, M3 Pro, 3024×1964; one run each; footprint sampled
+every 0.5 s for 40 s; "first graph frame" is the first scene drawn after the scan, from
+process start; "cold" has no layout cache, "warm" reuses it):
+
+| Vault | Run | First graph frame, before → after | Main thread blocked by scan + watch, before → after | Peak footprint | Footprint at 40 s |
+|---|---|---|---|---|---|
+| Real (2,617 notes) | cold | 1.30 s → 1.02 s | ~0.35 s → 0 | 352 → 337 MB | 72 → 71 MB |
+| Real | warm | 1.02 s → 0.62 s | ~0.35 s → 0 | 269 → 273 MB | 67 → 67 MB |
+| Synthetic (35,000, `make-big.js`) | cold | 1.78 s → 1.33 s | ~1.4 s → 0 | 642 → 612 MB | 349 → 283 MB |
+| Synthetic | warm | 1.74 s → 1.50 s | ~1.4 s → 0 | 400 → 294 MB | 205 → 170 MB |
+
+Before, the 35k vault's scan took ~0.8 s and arming the two watchers another ~0.5 s, all on
+the main thread (the scan log line came 0.5 s before the first graph frame; now ~0.1 s). The
+scan itself is unchanged (0.8–1.0 s for 35k notes). The 40 s footprint of the cold 35k run
+still includes the layout settling. Single runs: treat differences under ~10% as noise.
+
 ### Phase 7: Packaging and release (S–M)
 **You get:** a download that opens with no warnings and keeps itself up to date.
 - Universal binary (Apple Silicon + Intel), app bundle and `Info.plist`, icon.
