@@ -93,6 +93,13 @@ The team ID is the 10-character code at the end of your Developer ID identity. I
 submission comes back "Invalid", read Apple's reason with
 `xcrun notarytool log <submission-id> --keychain-profile vault-wallpaper-notary`.
 
+## Mac App Store
+
+A sandboxed build without the self-updater, signed for the store and packaged with
+`productbuild`, is in [`appstore/`](appstore/README.md): `packaging/appstore/build.sh
+--dry-run` for a local test, and the steps William takes in App Store
+Connect. `release.sh` calls it.
+
 ## One command: `release.sh`
 
 ```bash
