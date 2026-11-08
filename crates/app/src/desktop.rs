@@ -90,3 +90,22 @@ pub fn activate() {
         objc2_app_kit::NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
     }
 }
+
+/// A start-up failure the app can't recover from: logs it, shows it in an alert (so
+/// someone who launched the app from Finder sees why nothing appeared) and exits 1.
+///
+/// `VW_NO_ALERT=1` skips the alert (scripts and tests).
+pub fn fatal(message: &str, detail: &str) -> ! {
+    eprintln!("fatal: {message} ({detail})");
+    if std::env::var_os("VW_NO_ALERT").is_none()
+        && let Some(mtm) = objc2::MainThreadMarker::new()
+    {
+        activate();
+        let alert = objc2_app_kit::NSAlert::new(mtm);
+        alert.setMessageText(&objc2_foundation::NSString::from_str(message));
+        alert.setInformativeText(&objc2_foundation::NSString::from_str(detail));
+        alert.addButtonWithTitle(&objc2_foundation::NSString::from_str("Quit"));
+        alert.runModal();
+    }
+    std::process::exit(1)
+}
