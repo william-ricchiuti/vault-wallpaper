@@ -26,6 +26,8 @@ echo "==> staging"
 # ditto keeps the code signature, extended attributes and symlinks intact.
 ditto "$APP" "$STAGE/$(basename "$APP")"
 ln -s /Applications "$STAGE/Applications"
+# The licences of what's inside (packaging/notices.sh), next to the app.
+cp "$ROOT/THIRD-PARTY-NOTICES.txt" "$STAGE/THIRD-PARTY-NOTICES.txt"
 
 echo "==> hdiutil create $DMG"
 rm -f "$DMG"

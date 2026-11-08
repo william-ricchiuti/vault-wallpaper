@@ -26,7 +26,9 @@ cask "vault-wallpaper" do
 
   app "Vault Wallpaper.app"
 
-  uninstall quit: "com.williamricchiuti.vaultwallpaper"
+  # Start at Login registers the app as a login item; remove it with the app.
+  uninstall quit:       "com.williamricchiuti.vaultwallpaper",
+            login_item: "Vault Wallpaper"
 
   # Settings, layout cache and custom presets; WebKit data from the settings window; Sparkle's
   # state lives under Caches and Preferences. Exported PNGs in ~/Pictures are the user's.

@@ -37,6 +37,17 @@ if [[ -z "$DMG" || ! -f "$DMG" ]]; then
   exit 64
 fi
 
+# Whatever happens below, don't leave the DMG mounted or scratch folders behind.
+MNT="" WORK=""
+cleanup() {
+  if [[ -n "$MNT" ]]; then
+    hdiutil detach "$MNT" >/dev/null 2>&1 || hdiutil detach -force "$MNT" >/dev/null 2>&1 || true
+    rmdir "$MNT" 2>/dev/null || true
+  fi
+  [[ -z "$WORK" ]] || rm -rf "$WORK"
+}
+trap cleanup EXIT
+
 # What's inside: the app's versions and minimum macOS.
 MNT="$(mktemp -d "${TMPDIR:-/tmp}/vw-appcast.XXXXXX")"
 hdiutil attach -nobrowse -readonly -mountpoint "$MNT" "$DMG" >/dev/null 2>&1
@@ -47,8 +58,9 @@ APP_VERSION="$(read_key VWVersion)"
 BUILD="$(read_key CFBundleVersion)"
 SHORT="$(read_key CFBundleShortVersionString)"
 MIN_OS="$(read_key LSMinimumSystemVersion)"
-hdiutil detach "$MNT" >/dev/null 2>&1
+hdiutil detach "$MNT" >/dev/null
 rmdir "$MNT"
+MNT=""
 if [[ -z "$BUILD" ]]; then
   echo "error: $DMG has no app with a CFBundleVersion" >&2
   exit 1
@@ -89,7 +101,6 @@ SPARKLE_DIR="$("$ROOT/packaging/fetch-sparkle.sh" | tail -n 1)"
 # generate_appcast works on a folder and signs every archive in it: use a scratch folder
 # holding just this DMG and the existing appcast, then copy the result out.
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/vw-appcast-work.XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
 cp "$DMG" "$WORK/"
 [[ -f "$OUT_FILE" ]] && cp "$OUT_FILE" "$WORK/appcast.xml"
 

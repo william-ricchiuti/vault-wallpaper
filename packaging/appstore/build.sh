@@ -72,8 +72,11 @@ VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' crates
 [[ -n "$VERSION" ]] || { echo "error: could not read version from crates/app/Cargo.toml" >&2; exit 1; }
 SHORT_VERSION="${VERSION%%[-+]*}"
 # App Store Connect rejects an upload whose CFBundleVersion isn't higher than the last one
-# for the same CFBundleShortVersionString. The commit count only goes up.
-BUILD_NUMBER="${VW_BUILD_NUMBER:-$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)}"
+# for the same CFBundleShortVersionString. The commit count only goes up along main;
+# build-number.sh refuses a shallow clone or a commit that isn't on origin/main.
+# shellcheck source=../build-number.sh
+source "$ROOT/packaging/build-number.sh"
+vw_build_number "$ROOT" || exit 1
 echo "==> $APP_NAME $VERSION for the App Store (short $SHORT_VERSION, build $BUILD_NUMBER)"
 
 INSTALLED="$(rustup target list --installed)"
@@ -94,10 +97,13 @@ for t in "${TARGETS[@]}"; do
 done
 
 rm -rf "$APP" "$WORK"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$WORK"
+# The bundle is put together in a staging folder and copied to $APP with ditto at the end,
+# without resource forks, extended attributes or quarantine (see below).
+STAGE_APP="$WORK/stage/$APP_NAME.app"
+mkdir -p "$STAGE_APP/Contents/MacOS" "$STAGE_APP/Contents/Resources" "$WORK"
 
-lipo -create "${SLICES[@]}" -output "$APP/Contents/MacOS/$BIN_NAME"
-lipo -info "$APP/Contents/MacOS/$BIN_NAME"
+lipo -create "${SLICES[@]}" -output "$STAGE_APP/Contents/MacOS/$BIN_NAME"
+lipo -info "$STAGE_APP/Contents/MacOS/$BIN_NAME"
 
 echo "==> icon"
 ICON_PNG="$ROOT/packaging/icon/icon-1024.png"
@@ -108,12 +114,13 @@ for s in 16 32 128 256 512; do
   d=$((s * 2))
   sips -z "$d" "$d" "$ICON_PNG" --out "$SET/icon_${s}x${s}@2x.png" >/dev/null
 done
-iconutil -c icns "$SET" -o "$APP/Contents/Resources/AppIcon.icns"
+iconutil -c icns "$SET" -o "$STAGE_APP/Contents/Resources/AppIcon.icns"
 
-cp "$HERE/PrivacyInfo.xcprivacy" "$APP/Contents/Resources/PrivacyInfo.xcprivacy"
+cp "$ROOT/THIRD-PARTY-NOTICES.txt" "$STAGE_APP/Contents/Resources/THIRD-PARTY-NOTICES.txt"
+cp "$HERE/PrivacyInfo.xcprivacy" "$STAGE_APP/Contents/Resources/PrivacyInfo.xcprivacy"
 
 echo "==> Info.plist"
-cat >"$APP/Contents/Info.plist" <<PLIST
+cat >"$STAGE_APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -160,12 +167,20 @@ cat >"$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-printf 'APPL????' >"$APP/Contents/PkgInfo"
-plutil -lint "$APP/Contents/Info.plist"
+printf 'APPL????' >"$STAGE_APP/Contents/PkgInfo"
+plutil -lint "$STAGE_APP/Contents/Info.plist"
 
 # Extended attributes in the bundle become "._" AppleDouble files in the package payload,
-# which App Store validation can reject. Clear what can be cleared before signing.
+# which App Store validation can reject. The sources (icon, plist, binary, a downloaded
+# provisioning profile) may carry some, such as com.apple.quarantine or
+# com.apple.provenance, so the bundle is copied out of the staging folder without them.
+# --noclone matters: on APFS ditto otherwise clones, and a clone keeps every attribute
+# whatever --noextattr says. Run from a shell that macOS tracks for provenance (one started
+# by an editor or another app, or a script file that itself has the attribute executed
+# directly), the kernel tags even the fresh copies; the payload check below catches that.
 export COPYFILE_DISABLE=1
+echo "==> staging copy without extended attributes (ditto --noclone --norsrc --noextattr --noqtn)"
+ditto --noclone --norsrc --noextattr --noqtn "$STAGE_APP" "$APP"
 xattr -cr "$APP" 2>/dev/null || true
 
 PKG="$OUT/Vault-Wallpaper-$SHORT_VERSION-$BUILD_NUMBER.pkg"
@@ -178,7 +193,7 @@ if [[ -n "$ADHOC" ]]; then
   productbuild --component "$APP" /Applications "$PKG"
 else
   echo "==> embedding the provisioning profile"
-  cp "$VW_PROVISIONING_PROFILE" "$APP/Contents/embedded.provisionprofile"
+  ditto --noclone --norsrc --noextattr --noqtn "$VW_PROVISIONING_PROFILE" "$APP/Contents/embedded.provisionprofile"
   # The signed entitlements must match the profile: add the application and team ids.
   SIGNED_ENT="$WORK/entitlements.plist"
   cp "$ENTITLEMENTS" "$SIGNED_ENT"
@@ -196,8 +211,9 @@ fi
 DOTS="$(pkgutil --payload-files "$PKG" | grep -c '/\._' || true)"
 if [[ "$DOTS" != 0 ]]; then
   echo "warning: the package has $DOTS '._' AppleDouble entries (extended attributes such as" >&2
-  echo "         com.apple.provenance that xattr -c can't remove). Files written by a process macOS" >&2
-  echo "         tracks for provenance (some app-launched shells) carry it. Build from Terminal and" >&2
+  echo "         com.apple.provenance that xattr -c can't remove). macOS adds it to every file a" >&2
+  echo "         provenance-tracked process writes (a shell started by an editor or another app)," >&2
+  echo "         even after the clean ditto copy. Build from Terminal.app (or a launchd job) and" >&2
   echo "         check: pkgutil --payload-files \"$PKG\" | grep '/\._'" >&2
   [[ -n "$ADHOC" ]] || exit 1
 fi

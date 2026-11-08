@@ -14,12 +14,15 @@
 #                  (for releasing by tag: bump, commit, tag, push).
 #
 # Real run needs (see docs/release-checklist.md, "One-time setup"):
+#   the real SPARKLE_PUBLIC_ED_KEY in packaging/sparkle.env (checked first)
+#   a "## [<version>]" section in CHANGELOG.md, a clean tree, HEAD on origin/main
 #   VW_SIGN_IDENTITY                          "Developer ID Application: Name (TEAMID)"
 #   VW_NOTARY_PROFILE, or VW_NOTARY_KEY_PATH + VW_NOTARY_KEY_ID + VW_NOTARY_ISSUER
 #   a Sparkle key for make-appcast.sh: VW_SPARKLE_PRIVATE_KEY, VW_SPARKLE_KEY_FILE, or the
 #   login Keychain (where sparkle-keys.sh puts it)
+#   VW_PREVIOUS_APPCAST (optional): the current feed, if it can't be downloaded
 #
-# It uploads nothing. At the end it prints the git and `gh release create` commands to run.
+# It uploads nothing. At the end it prints the git and `gh release` commands to run.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -29,7 +32,7 @@ DIST="$ROOT/dist"
 REPO="william-ricchiuti/vault-wallpaper"
 APP_TOML="crates/app/Cargo.toml"
 
-usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; }
 
 VERSION=""
 DRY_RUN=0
@@ -59,10 +62,19 @@ DMG="$DIST/Vault-Wallpaper-$VERSION.dmg"
 APPCAST="$DIST/appcast.xml"
 PRERELEASE=""
 [[ "$VERSION" == *-* ]] && PRERELEASE="--prerelease"
+# shellcheck source=sparkle.env
+source "$PKG/sparkle.env"
+# The Sparkle feed lives on its own release (tag $SPARKLE_APPCAST_TAG), so its URL always
+# exists, whatever the newest version release is (packaging/README.md, "Updates").
+FEED_URL="https://github.com/$REPO/releases/download/$SPARKLE_APPCAST_TAG/appcast.xml"
 
 step() { printf '\n==> [release] %s\n' "$*"; }
 skip() { printf '    [dry-run] skipped: %s\n' "$*"; }
 die() { echo "error: $*" >&2; exit 1; }
+# A dry run reports what would stop a real one and carries on.
+check_fail() {
+  if ((DRY_RUN)); then echo "    warning (a real run stops here): $*"; else die "$*"; fi
+}
 
 if ((BUMP_ONLY && DRY_RUN)); then
   die "--bump-only and --dry-run don't go together"
@@ -79,6 +91,26 @@ fi
 # 0. Preflight
 # ---------------------------------------------------------------------------------------
 step "preflight"
+if ((!BUMP_ONLY)); then
+  # First, before anything else: a release built with the placeholder key ships an app whose
+  # updater is off for good (no later update can reach it).
+  if [[ "$SPARKLE_PUBLIC_ED_KEY" == REPLACE_WITH_* ]]; then
+    check_fail "SPARKLE_PUBLIC_ED_KEY in packaging/sparkle.env is still the placeholder; run packaging/sparkle-keys.sh and commit the public key (docs/release-checklist.md, A3)"
+  else
+    echo "    Sparkle public key: ${SPARKLE_PUBLIC_ED_KEY:0:8}..."
+  fi
+  for v in VW_SPARKLE_PUBLIC_KEY VW_SPARKLE_FEED_URL; do
+    [[ -z "${!v:-}" ]] || check_fail "$v is set (a test override); a release must use packaging/sparkle.env"
+  done
+  if [[ "$SPARKLE_FEED_URL" != "$FEED_URL" ]]; then
+    check_fail "SPARKLE_FEED_URL in packaging/sparkle.env is $SPARKLE_FEED_URL, but the appcast is published at $FEED_URL"
+  fi
+  if grep -qF "## [$VERSION]" CHANGELOG.md; then
+    echo "    CHANGELOG.md has a [$VERSION] section"
+  else
+    check_fail "CHANGELOG.md has no '## [$VERSION]' section; move the Unreleased notes under it"
+  fi
+fi
 for tool in cargo rustup lipo hdiutil shasum git; do
   command -v "$tool" >/dev/null || die "$tool not found"
 done
@@ -97,6 +129,31 @@ if ((!DRY_RUN && !BUMP_ONLY)); then
   [[ -x "$PKG/make-appcast.sh" ]] || die "packaging/make-appcast.sh is missing; the Sparkle appcast can't be made"
   if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
     echo "    note: tag $TAG already exists locally"
+  fi
+fi
+if ((!BUMP_ONLY)); then
+  # CFBundleVersion is the commit count, which only rises along main (build-number.sh).
+  # shellcheck source=build-number.sh
+  source "$PKG/build-number.sh"
+  if BUILD_ERR="$(vw_build_number "$ROOT" 2>&1)"; then
+    vw_build_number "$ROOT"
+    echo "    build number (CFBundleVersion): $BUILD_NUMBER"
+  else
+    printf '%s\n' "$BUILD_ERR" | sed 's/^/    /'
+    check_fail "the build number can't be trusted (above)"
+    # Dry run: build anyway, from whatever commit this is.
+    export VW_BUILD_FROM_ANY_COMMIT=1
+  fi
+  # Licence notices shipped in the app and the DMG (packaging/notices.sh).
+  if command -v cargo-about >/dev/null; then
+    if "$PKG/notices.sh" --check; then
+      echo "    THIRD-PARTY-NOTICES.txt is up to date"
+    else
+      check_fail "THIRD-PARTY-NOTICES.txt is out of date; run packaging/notices.sh and commit it"
+    fi
+  else
+    echo "    warning: cargo-about isn't installed, so THIRD-PARTY-NOTICES.txt wasn't checked"
+    echo "             (cargo install --locked cargo-about, then packaging/notices.sh --check)"
   fi
 fi
 
@@ -164,6 +221,18 @@ if ((DRY_RUN)); then
 else
   "$PKG/sign.sh" "$APP"
 fi
+BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")"
+
+# ---------------------------------------------------------------------------------------
+# 3b. Notarize and staple the app itself, so the copy in /Applications (from the DMG,
+#     Homebrew or a Sparkle update) carries its own ticket and passes Gatekeeper offline.
+# ---------------------------------------------------------------------------------------
+step "notarize and staple the app"
+if ((DRY_RUN)); then
+  skip "packaging/notarize.sh \"$APP\" (zip, notarytool submit --wait, staple the .app)"
+else
+  "$PKG/notarize.sh" "$APP"
+fi
 
 # ---------------------------------------------------------------------------------------
 # 4. DMG (make-dmg.sh signs it when VW_SIGN_IDENTITY is set)
@@ -179,7 +248,7 @@ fi
 # ---------------------------------------------------------------------------------------
 # 5. Notarize and staple
 # ---------------------------------------------------------------------------------------
-step "notarize and staple"
+step "notarize and staple the DMG"
 if ((DRY_RUN)); then
   skip "packaging/notarize.sh $DMG"
 else
@@ -221,10 +290,50 @@ write_test_appcast() {
 </rss>
 XML
 }
+# make-appcast.sh adds the new item on top of whatever is already at --out, so never start
+# from a leftover file: a real run starts from the published feed (its signed items are the
+# update history) or, for the very first release, from nothing.
+rm -f "$APPCAST"
+fetch_previous_appcast() {
+  local tmp code
+  if [[ -n "${VW_PREVIOUS_APPCAST:-}" ]]; then
+    [[ -f "$VW_PREVIOUS_APPCAST" ]] || die "VW_PREVIOUS_APPCAST=$VW_PREVIOUS_APPCAST doesn't exist"
+    cp "$VW_PREVIOUS_APPCAST" "$APPCAST"
+    echo "    starting from VW_PREVIOUS_APPCAST ($VW_PREVIOUS_APPCAST)"
+    return
+  fi
+  if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
+    # Works while the repo is private, too.
+    local why
+    if why="$(gh release view "$SPARKLE_APPCAST_TAG" --repo "$REPO" --json tagName 2>&1)"; then
+      gh release download "$SPARKLE_APPCAST_TAG" --repo "$REPO" --pattern appcast.xml --output "$APPCAST" ||
+        die "release $SPARKLE_APPCAST_TAG exists but its appcast.xml couldn't be downloaded"
+      echo "    starting from the published feed (release $SPARKLE_APPCAST_TAG)"
+    elif grep -qi 'not found' <<<"$why"; then
+      echo "    no $SPARKLE_APPCAST_TAG release yet: this is the first release, starting a new feed"
+    else
+      die "couldn't look up release $SPARKLE_APPCAST_TAG ($why); set VW_PREVIOUS_APPCAST to the current feed"
+    fi
+    return
+  fi
+  tmp="$(mktemp "${TMPDIR:-/tmp}/vw-appcast-prev.XXXXXX")"
+  code="$(curl -sSL -o "$tmp" -w '%{http_code}' "$FEED_URL" || true)"
+  case "$code" in
+    200) mv "$tmp" "$APPCAST"; echo "    starting from the published feed ($FEED_URL)" ;;
+    404)
+      rm -f "$tmp"
+      echo "    $FEED_URL: 404, so this is the first release; starting a new feed"
+      echo "    (while the repo is private a 404 can also mean no access: log in with gh, or set VW_PREVIOUS_APPCAST)"
+      ;;
+    *) rm -f "$tmp"; die "couldn't download $FEED_URL (HTTP ${code:-none}); set VW_PREVIOUS_APPCAST to the current feed" ;;
+  esac
+}
 if [[ -x "$PKG/make-appcast.sh" ]]; then
   if ((DRY_RUN)); then
+    echo "    dry run: a new, unsigned feed holding just this version"
     "$PKG/make-appcast.sh" "$DMG" "$VERSION" --out "$APPCAST" --unsigned
   else
+    fetch_previous_appcast
     "$PKG/make-appcast.sh" "$DMG" "$VERSION" --out "$APPCAST"
   fi
 else
@@ -236,11 +345,20 @@ fi
 if command -v xmllint >/dev/null; then
   xmllint --noout "$APPCAST"
 fi
-if grep -q 'sparkle:edSignature' "$APPCAST"; then
-  echo "    appcast signed (sparkle:edSignature present)"
+# Every <item>, old and new, must carry an EdDSA signature: Sparkle refuses an unsigned one.
+read -r ITEMS UNSIGNED_ITEMS < <(awk '
+  /<item[ >]/ {n++; inside=1; signed=0}
+  inside && /sparkle:edSignature=/ {signed=1}
+  /<\/item>/ {if (inside && !signed) bad++; inside=0}
+  END {print n+0, bad+0}' "$APPCAST")
+if ((ITEMS == 0)); then
+  die "$APPCAST has no <item>"
+elif ((UNSIGNED_ITEMS == 0)); then
+  echo "    appcast: $ITEMS item(s), all signed (sparkle:edSignature)"
+elif ((DRY_RUN)); then
+  echo "    appcast: $UNSIGNED_ITEMS of $ITEMS item(s) UNSIGNED (expected for a dry run)"
 else
-  echo "    appcast UNSIGNED$( ((DRY_RUN)) && echo ' (expected for a dry run)')"
-  ((DRY_RUN)) || die "the appcast has no sparkle:edSignature"
+  die "$APPCAST: $UNSIGNED_ITEMS of $ITEMS <item>s have no sparkle:edSignature"
 fi
 
 # ---------------------------------------------------------------------------------------
@@ -289,6 +407,7 @@ awk -v v="$VERSION" '$0 ~ "^## \\[" v "\\]" {on=1; next} /^## \[/ {on=0} on' CHA
 cat <<EOF
 
 ==> [release] done$( ((DRY_RUN)) && echo ' (DRY RUN: unsigned, not notarized, nothing uploaded)')
+    version  $VERSION, CFBundleVersion (build number) $BUILD
     DMG      $DMG
              sha256 $SHA256  ($DMG_BYTES bytes)
     appcast  $APPCAST
@@ -299,9 +418,9 @@ EOF
 if [[ -n "$PRERELEASE" ]]; then
   cat <<EOF
 
-    WARNING: $VERSION is a pre-release. GitHub's releases/latest (the Sparkle feed URL) skips
-    pre-releases, so Sparkle users won't be offered it, and Homebrew users will still get it.
-    To ship it as an update anyway, drop --prerelease from the gh command below.
+    Note: $VERSION is marked a GitHub pre-release. The Sparkle feed is the fixed
+    $SPARKLE_APPCAST_TAG release, not releases/latest, so step 3 below still offers it to
+    Sparkle users. Skip step 3 to hold a release back from auto-update.
 EOF
 fi
 
@@ -319,13 +438,12 @@ cat <<EOF
    git commit -am "chore(release): $VERSION"
    git push origin HEAD
 
-2. Publish the GitHub Release with the DMG and the appcast. --target makes GitHub create the
-   tag only after the files are up; if that starts .github/workflows/release.yml, the
-   workflow sees the DMG is already there and stops. Don't push the tag before this step.
+2. Publish the GitHub Release with the DMG. --target makes GitHub create the tag only after
+   the file is up; if that starts .github/workflows/release.yml, the workflow sees the DMG
+   is already there and stops. Don't push the tag before this step.
 
    gh release create $TAG \\
      "$DMG" \\
-     "$APPCAST" \\
      --repo $REPO \\
      --target "\$(git rev-parse HEAD)" \\
      --title "Vault Wallpaper $VERSION" \\
@@ -334,7 +452,18 @@ cat <<EOF
 
    git fetch --tags
 
-3. Bump the Homebrew cask in the tap (a clone of william-ricchiuti/homebrew-tap):
+3. Publish the Sparkle feed, after the DMG it points to is up. The feed is appcast.xml on
+   the fixed release $SPARKLE_APPCAST_TAG (created once, marked pre-release so it is never
+   "latest"). --clobber replaces the previous feed, whose items this one already holds.
+
+   gh release view $SPARKLE_APPCAST_TAG --repo $REPO >/dev/null 2>&1 ||
+     gh release create $SPARKLE_APPCAST_TAG --repo $REPO --prerelease --latest=false \\
+       --target "\$(git rev-parse HEAD)" --title "Sparkle update feed" \\
+       --notes "appcast.xml for Vault Wallpaper's automatic updates. Not a release; don't delete it."
+   gh release upload $SPARKLE_APPCAST_TAG "$APPCAST" --repo $REPO --clobber
+   curl -fsSL $FEED_URL | grep -c '<item'   # the feed is live
+
+4. Bump the Homebrew cask in the tap (a clone of william-ricchiuti/homebrew-tap):
 
    packaging/homebrew/bump-cask.sh $VERSION "$DMG" ~/dev/homebrew-tap
    (then commit and push in the tap; see docs/release-checklist.md)
@@ -342,7 +471,7 @@ EOF
 if [[ -n "$APPSTORE_PKG" ]]; then
   cat <<EOF
 
-4. Upload the App Store package with Transporter, or with xcrun altool --upload-app
+5. Upload the App Store package with Transporter, or with xcrun altool --upload-app
    (steps in packaging/appstore/README.md, "Each release"):
 
    $APPSTORE_PKG

@@ -1,6 +1,7 @@
-# Release the direct build when a version tag is pushed: build universal, sign, notarize,
-# staple, make the DMG and the signed Sparkle appcast (packaging/release.sh), publish the
-# GitHub Release, and open a cask bump PR in william-ricchiuti/homebrew-tap.
+# Release the direct build when a version tag is pushed: build universal, sign, notarize and
+# staple the app, make, notarize and staple the DMG, make the signed Sparkle appcast
+# (packaging/release.sh), publish the GitHub Release, update the Sparkle feed (appcast.xml
+# on the fixed `appcast` release) and open a cask bump PR in william-ricchiuti/homebrew-tap.
 #
 # Trigger: `git push origin v1.0.0` (the tag must match crates/app/Cargo.toml).
 # Secrets: listed and explained in docs/release-checklist.md ("GitHub Actions secrets").
@@ -36,8 +37,11 @@ jobs:
   release:
     runs-on: macos-latest
     timeout-minutes: 90
+    # Recommended once the repo is public: a "release" environment with required reviewers,
+    # so a pushed tag waits for approval before the signing secrets are used. Create it in
+    # Settings > Environments, then add `environment: release` here (docs/release-checklist.md, A6b).
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # Full history: build-app.sh uses the commit count as CFBundleVersion.
           fetch-depth: 0
@@ -53,6 +57,17 @@ jobs:
           fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
           if [[ "$V" == *-* ]]; then echo "prerelease=true" >> "$GITHUB_OUTPUT"; else echo "prerelease=false" >> "$GITHUB_OUTPUT"; fi
+
+      # Before anything else: an app built with the placeholder Sparkle key can never be
+      # updated. release.sh checks this too; failing here costs no build minutes.
+      - name: Sparkle public key is set
+        run: |
+          source packaging/sparkle.env
+          if [[ "$SPARKLE_PUBLIC_ED_KEY" == REPLACE_WITH_* ]]; then
+            echo "::error::SPARKLE_PUBLIC_ED_KEY in packaging/sparkle.env is still the placeholder (docs/release-checklist.md, A3)"
+            exit 1
+          fi
+          echo "Sparkle public key: ${SPARKLE_PUBLIC_ED_KEY:0:8}..."
 
       # Publishing from William's Mac (packaging/release.sh + gh release create) also pushes
       # the tag. If that release already has the DMG, stop here instead of rebuilding.
@@ -70,12 +85,14 @@ jobs:
             echo "published=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned to a commit, so the toolchain has to be named (it isn't taken from the ref).
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-11-08
         if: steps.existing.outputs.published != 'true'
         with:
+          toolchain: stable
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: steps.existing.outputs.published != 'true'
 
       - name: Import the Developer ID certificate
@@ -123,9 +140,12 @@ jobs:
           printf '%s\n' "$APPSTORE_CONNECT_API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
           chmod 600 "$RUNNER_TEMP/AuthKey.p8"
 
-      - name: Build, sign, notarize, DMG, appcast
+      # release.sh starts the appcast from the published feed (gh release download appcast),
+      # which needs GH_TOKEN while the repo is private.
+      - name: Build, sign, notarize app and DMG, appcast
         if: steps.existing.outputs.published != 'true'
         env:
+          GH_TOKEN: ${{ github.token }}
           VW_SIGN_IDENTITY: ${{ steps.keychain.outputs.identity }}
           VW_NOTARY_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
           VW_NOTARY_KEY_ID: ${{ secrets.APPSTORE_CONNECT_API_KEY_ID }}
@@ -144,15 +164,30 @@ jobs:
           FLAGS=()
           [[ "$PRERELEASE" == "true" ]] && FLAGS+=(--prerelease)
           if gh release view "$GITHUB_REF_NAME" --repo "$REPO" >/dev/null 2>&1; then
-            # A release without the DMG (e.g. a draft made by hand): add the files to it.
-            gh release upload "$GITHUB_REF_NAME" "dist/Vault-Wallpaper-$V.dmg" dist/appcast.xml \
+            # A release without the DMG (e.g. a draft made by hand): add the DMG to it.
+            gh release upload "$GITHUB_REF_NAME" "dist/Vault-Wallpaper-$V.dmg" \
               --repo "$REPO" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" "dist/Vault-Wallpaper-$V.dmg" dist/appcast.xml \
+            gh release create "$GITHUB_REF_NAME" "dist/Vault-Wallpaper-$V.dmg" \
               --repo "$REPO" --verify-tag \
               --title "Vault Wallpaper $V" \
               --notes-file "dist/release-notes-$V.md" "${FLAGS[@]}"
           fi
+
+      # The feed (SUFeedURL) is appcast.xml on the fixed `appcast` release, so it exists
+      # whether or not this version is a pre-release. Uploaded after the DMG it points to.
+      - name: Publish the Sparkle feed
+        if: steps.existing.outputs.published != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source packaging/sparkle.env
+          if ! gh release view "$SPARKLE_APPCAST_TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release create "$SPARKLE_APPCAST_TAG" --repo "$REPO" --prerelease --latest=false \
+              --target "$GITHUB_SHA" --title "Sparkle update feed" \
+              --notes "appcast.xml for Vault Wallpaper's automatic updates. Not a release; don't delete it."
+          fi
+          gh release upload "$SPARKLE_APPCAST_TAG" dist/appcast.xml --repo "$REPO" --clobber
 
       - name: Open a cask bump PR in the tap
         if: steps.existing.outputs.published != 'true'
