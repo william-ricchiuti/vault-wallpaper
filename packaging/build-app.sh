@@ -4,6 +4,13 @@
 # Usage: packaging/build-app.sh
 # Needs: rustup, Xcode command line tools (lipo, iconutil, sips, plutil).
 # Output is unsigned; run packaging/sign.sh next.
+#
+# VW_FEATURES: Cargo features of the app. Unset means `updater`, the direct-download build
+# (DMG, Homebrew): the Sparkle updater plus Sparkle.framework in Contents/Frameworks.
+# Set it empty (VW_FEATURES=) for the Mac App Store build: no updater, no framework.
+# Sparkle is embedded whenever the list contains `updater`.
+# Env: VW_SPARKLE_FEED_URL / VW_SPARKLE_PUBLIC_KEY override SUFeedURL / SUPublicEDKey
+#      (packaging/sparkle.env has the release values); VW_VERSION overrides the version.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -20,7 +27,8 @@ APP="$DIST/$APP_NAME.app"
 WORK="$DIST/.work"
 
 # Version from crates/app/Cargo.toml (first `version = "..."` line, which is [package]).
-VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' crates/app/Cargo.toml | head -n 1)"
+VERSION="${VW_VERSION:-}"
+[[ -n "$VERSION" ]] || VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' crates/app/Cargo.toml | head -n 1)"
 if [[ -z "$VERSION" ]]; then
   echo "error: could not read version from crates/app/Cargo.toml" >&2
   exit 1
@@ -31,6 +39,18 @@ fi
 # make-dmg.sh uses for the file name.
 SHORT_VERSION="${VERSION%%[-+]*}"
 BUILD_NUMBER="${VW_BUILD_NUMBER:-$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)}"
+FEATURE_LIST="${VW_FEATURES-updater}"
+FEATURES=()
+[[ -n "$FEATURE_LIST" ]] && FEATURES=(--features "$FEATURE_LIST")
+UPDATER=0
+[[ ",${FEATURE_LIST// /,}," == *,updater,* ]] && UPDATER=1
+if [[ "$UPDATER" == 1 ]]; then
+  # shellcheck source=sparkle.env
+  source "$ROOT/packaging/sparkle.env"
+  FEED_URL="${VW_SPARKLE_FEED_URL:-$SPARKLE_FEED_URL}"
+  PUBLIC_KEY="${VW_SPARKLE_PUBLIC_KEY:-$SPARKLE_PUBLIC_ED_KEY}"
+  SPARKLE_DIR="$("$ROOT/packaging/fetch-sparkle.sh" | tail -n 1)"
+fi
 echo "==> $APP_NAME $VERSION (short $SHORT_VERSION, build $BUILD_NUMBER, $BUNDLE_ID)"
 
 # Install missing rustup targets, and only those.
@@ -50,8 +70,8 @@ done
 unset MACOSX_DEPLOYMENT_TARGET
 SLICES=()
 for t in "${TARGETS[@]}"; do
-  echo "==> cargo build --release -p $BIN_NAME --target $t"
-  cargo build --release --locked -p "$BIN_NAME" --target "$t"
+  echo "==> cargo build --release -p $BIN_NAME --target $t ${FEATURES[*]+${FEATURES[*]}}"
+  cargo build --release --locked -p "$BIN_NAME" --target "$t" ${FEATURES[@]+"${FEATURES[@]}"}
   SLICES+=("${CARGO_TARGET_DIR:-$ROOT/target}/$t/release/$BIN_NAME")
 done
 
@@ -61,6 +81,29 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$WORK"
 echo "==> lipo -> universal binary"
 lipo -create "${SLICES[@]}" -output "$APP/Contents/MacOS/$BIN_NAME"
 lipo -info "$APP/Contents/MacOS/$BIN_NAME"
+
+# Sparkle: the app loads Contents/Frameworks/Sparkle.framework at run time by path
+# (crates/app/src/updater.rs), so the binary needs no rpath or link-time dependency, and the
+# same framework (itself universal) serves both slices. ditto keeps its symlinks.
+SPARKLE_KEYS=""
+if [[ "$UPDATER" == 1 ]]; then
+  echo "==> Sparkle.framework $SPARKLE_VERSION -> Contents/Frameworks"
+  mkdir -p "$APP/Contents/Frameworks"
+  ditto "$SPARKLE_DIR/Sparkle.framework" "$APP/Contents/Frameworks/Sparkle.framework"
+  if [[ "$PUBLIC_KEY" == REPLACE_WITH_* ]]; then
+    echo "warning: SUPublicEDKey is still the placeholder; the updater stays off in this build." >&2
+    echo "         Run packaging/sparkle-keys.sh and put the key in packaging/sparkle.env." >&2
+  fi
+  # SUScheduledCheckInterval is Sparkle's default (one day), written out so it's visible.
+  SPARKLE_KEYS="	<key>SUFeedURL</key>
+	<string>$FEED_URL</string>
+	<key>SUPublicEDKey</key>
+	<string>$PUBLIC_KEY</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>"
+fi
 
 # Icon: PNG -> .iconset -> .icns. The PNG is drawn by
 # `cargo run --release -p vw-render --example app_icon -- packaging/icon/icon-1024.png`.
@@ -111,6 +154,7 @@ cat >"$APP/Contents/Info.plist" <<PLIST
 	<key>NSHumanReadableCopyright</key>
 	<string>© William Ricchiuti</string>
 $ICON_KEY
+$SPARKLE_KEYS
 	<key>LSMinimumSystemVersion</key>
 	<string>$MIN_MACOS</string>
 	<key>LSUIElement</key>

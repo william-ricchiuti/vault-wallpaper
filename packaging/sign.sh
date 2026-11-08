@@ -4,6 +4,8 @@
 # Usage: VW_SIGN_IDENTITY="Developer ID Application: Name (TEAMID)" packaging/sign.sh [app]
 # Needs: a "Developer ID Application" certificate in your login keychain.
 # Refuses to run without VW_SIGN_IDENTITY, so it never signs with the wrong identity by accident.
+# VW_SIGN_IDENTITY=- signs ad hoc (no certificate, timestamp or hardened runtime): local tests only.
+# Signs an embedded Sparkle.framework first, inside out, as Sparkle's docs describe.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -35,12 +37,26 @@ if [[ ! -d "$APP" ]]; then
   exit 1
 fi
 
+# Ad hoc (`-`): no timestamp and no hardened runtime. Under the hardened runtime, library
+# validation only loads code with the app's Team ID, and ad hoc signatures have none, so
+# dyld refuses Sparkle.framework ("different Team IDs"). Developer ID builds are unaffected.
+FLAGS=(--timestamp --options runtime)
+[[ "$VW_SIGN_IDENTITY" == "-" ]] && FLAGS=()
+sign() { codesign --force ${FLAGS[@]+"${FLAGS[@]}"} --sign "$VW_SIGN_IDENTITY" "$@"; }
+
 echo "==> signing $APP"
 echo "    identity: $VW_SIGN_IDENTITY"
-codesign --force --timestamp --options runtime \
-  --entitlements "$ENTITLEMENTS" \
-  --sign "$VW_SIGN_IDENTITY" \
-  "$APP"
+SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
+if [[ -d "$SPARKLE" ]]; then
+  echo "==> Sparkle.framework (XPC services, Autoupdate, Updater.app, then the framework)"
+  B="$SPARKLE/Versions/B"
+  sign "$B/XPCServices/Installer.xpc"
+  sign --preserve-metadata=entitlements "$B/XPCServices/Downloader.xpc"
+  sign "$B/Autoupdate"
+  sign "$B/Updater.app"
+  sign "$SPARKLE"
+fi
+sign --entitlements "$ENTITLEMENTS" "$APP"
 
 echo "==> verifying"
 codesign --verify --strict --deep --verbose=2 "$APP"

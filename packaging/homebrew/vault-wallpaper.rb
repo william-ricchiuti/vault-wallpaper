@@ -20,6 +20,8 @@ cask "vault-wallpaper" do
     strategy :github_releases
   end
 
+  # The app updates itself with Sparkle; `brew upgrade` leaves it alone unless --greedy.
+  auto_updates true
   depends_on macos: ">= :ventura"
 
   app "Vault Wallpaper.app"
