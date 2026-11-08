@@ -115,8 +115,10 @@ Check the names with `gh secret list`.
 
 The App Store build has its own certificates (Apple Distribution, Mac Installer
 Distribution), a provisioning profile and an App Store Connect app record. These are covered
-in `packaging/appstore/` (the App Store work). `release.sh` calls
-`packaging/appstore/build-appstore.sh` once it exists. CI doesn't build it.
+in `packaging/appstore/README.md`. Once `VW_TEAM_ID`, `VW_APP_IDENTITY`,
+`VW_INSTALLER_IDENTITY` and `VW_PROVISIONING_PROFILE` are set, `release.sh` builds the signed
+`.pkg` through `packaging/appstore/build.sh`. Until then it says the App Store step was
+skipped. CI doesn't build it.
 
 ### A8. Try it without publishing (anyone)
 
@@ -146,6 +148,10 @@ export VW_SIGN_IDENTITY="Developer ID Application: William Ricchiuti (TEAMID)"
 export VW_NOTARY_PROFILE=vault-wallpaper-notary
 packaging/release.sh 1.0.0-beta.2
 ```
+
+Run it from Terminal.app, not from a shell that an app such as an editor or Claude
+started. Files those shells write get `com.apple.provenance` attributes, which end up as
+`._` files in the App Store package, and `build.sh` refuses such a package.
 
 It bumps the version, builds the universal app with the Sparkle updater, signs, makes and
 signs the DMG, notarizes and staples, makes the signed appcast, and builds the App Store
@@ -187,7 +193,7 @@ the GitHub Release (a pre-release if the version has a `-`: Sparkle users aren't
 pre-releases, because the feed follows `releases/latest`) with the DMG and `appcast.xml`,
 and opens a cask bump PR in the tap. Merge that PR. Watch the run with `gh run watch`.
 
-Build the App Store package on the Mac (`packaging/appstore/build-appstore.sh`) and upload it
+Build the App Store package on the Mac (`packaging/appstore/build.sh`) and upload it
 as described there.
 
 ### B4. Check the published release (anyone, on a Mac)

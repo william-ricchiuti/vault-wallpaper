@@ -109,7 +109,7 @@ In order, it:
    build doesn't)
 4. runs `sign.sh`, then `make-dmg.sh`, then `notarize.sh`
 5. runs `make-appcast.sh` and checks the result has an `sparkle:edSignature`
-6. runs `appstore/build-appstore.sh` if it exists
+6. runs `appstore/build.sh` if it exists (its exit code 2, "not set up", counts as skipped)
 7. writes the release notes from `CHANGELOG.md` and prints the `git`, `gh release create`
    and `bump-cask.sh` commands to run
 
@@ -133,7 +133,7 @@ These are agreed between sessions. If you change one, change `release.sh` too.
 | `build-app.sh` | packaging + Sparkle session | `VW_FEATURES` unset: direct build (`updater`, Sparkle.framework embedded); `VW_FEATURES=` (set, empty): App Store build, no Sparkle; any list containing `updater` embeds Sparkle. `release.sh` sets `VW_FEATURES=updater` explicitly | `dist/Vault Wallpaper.app` |
 | `notarize.sh` | packaging | `VW_NOTARY_PROFILE=<profile>`, or `VW_NOTARY_KEY_PATH` + `VW_NOTARY_KEY_ID` + `VW_NOTARY_ISSUER` (API key, used by CI) | the DMG, stapled |
 | `make-appcast.sh` | Sparkle session | `make-appcast.sh <dmg> [<version>] [--out <file>] [--unsigned]`; version defaults to the DMG app's `VWVersion`. Key source, in order: `VW_SPARKLE_PRIVATE_KEY` (base64 seed; CI's `SPARKLE_PRIVATE_KEY` secret), `VW_SPARKLE_KEY_FILE` (path), then the login Keychain. Prints the appcast path on its last stdout line | default `dist/appcast/appcast.xml`; `release.sh` passes `--out dist/appcast.xml` |
-| `appstore/build-appstore.sh` | App Store session | `build-appstore.sh [--dry-run]`; the version is already bumped | `dist/appstore/Vault-Wallpaper-<version>.pkg` |
+| `appstore/build.sh` | App Store session | `build.sh [--dry-run]` (dry run: ad-hoc signed, unsigned pkg). A real build needs `VW_TEAM_ID`, `VW_APP_IDENTITY`, `VW_INSTALLER_IDENTITY`, `VW_PROVISIONING_PROFILE`, else exit 2. Reads the version from `crates/app/Cargo.toml`, so it runs after the bump | `dist/appstore/Vault-Wallpaper-<short>-<build>.pkg`, path on the last stdout line |
 | `homebrew/bump-cask.sh` | release automation | `bump-cask.sh <version> <dmg> [tap-dir]` | edits `<tap-dir>/Casks/vault-wallpaper.rb` |
 
 The enclosure URL is

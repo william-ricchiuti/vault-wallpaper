@@ -246,23 +246,37 @@ fi
 # ---------------------------------------------------------------------------------------
 # 7. Mac App Store package
 # ---------------------------------------------------------------------------------------
-# HOOK: the App Store session owns packaging/appstore/. Interface (packaging/README.md):
-#   packaging/appstore/build-appstore.sh [--dry-run]  ->  dist/appstore/Vault-Wallpaper-<v>.pkg
-APPSTORE_SCRIPT="$PKG/appstore/build-appstore.sh"
+# The App Store session owns packaging/appstore/. Interface (packaging/README.md):
+#   packaging/appstore/build.sh [--dry-run]
+#   -> dist/appstore/Vault-Wallpaper-<short>-<build>.pkg, its path on the last stdout line.
+#   Exit 2 means "not set up" (no VW_TEAM_ID / identities / profile): skipped, not a failure.
+APPSTORE_SCRIPT="$PKG/appstore/build.sh"
 APPSTORE_PKG=""
 step "Mac App Store package"
 if ((!APPSTORE)); then
   echo "    skipped (--no-appstore)"
 elif [[ -x "$APPSTORE_SCRIPT" ]]; then
+  APPSTORE_LOG="$DIST/appstore-build.log"
+  mkdir -p "$DIST"
+  # Progress shows as it runs; stdout is also kept so the last line gives the pkg path.
+  set +e
   if ((DRY_RUN)); then
-    "$APPSTORE_SCRIPT" --dry-run
+    "$APPSTORE_SCRIPT" --dry-run | tee "$APPSTORE_LOG"
   else
-    "$APPSTORE_SCRIPT"
+    "$APPSTORE_SCRIPT" | tee "$APPSTORE_LOG"
   fi
-  APPSTORE_PKG="$DIST/appstore/Vault-Wallpaper-$VERSION.pkg"
-  [[ -f "$APPSTORE_PKG" ]] || echo "    warning: expected $APPSTORE_PKG"
+  APPSTORE_RC=${PIPESTATUS[0]}
+  set -e
+  case "$APPSTORE_RC" in
+    0)
+      APPSTORE_PKG="$(tail -n 1 "$APPSTORE_LOG")"
+      [[ -f "$APPSTORE_PKG" ]] || die "App Store build said it wrote '$APPSTORE_PKG', which doesn't exist"
+      ;;
+    2) echo "    App Store step skipped: not set up (see packaging/appstore/README.md)" ;;
+    *) die "packaging/appstore/build.sh failed (exit $APPSTORE_RC)" ;;
+  esac
 else
-  echo "    HOOK NOT CONNECTED: $APPSTORE_SCRIPT does not exist yet, so no App Store build."
+  echo "    HOOK NOT CONNECTED: $APPSTORE_SCRIPT is not on this branch yet, so no App Store build."
 fi
 
 # ---------------------------------------------------------------------------------------
@@ -328,8 +342,9 @@ EOF
 if [[ -n "$APPSTORE_PKG" ]]; then
   cat <<EOF
 
-4. Upload the App Store package (Transporter, or):
+4. Upload the App Store package with Transporter, or with xcrun altool --upload-app
+   (steps in packaging/appstore/README.md, "Each release"):
 
-   xcrun altool --upload-package "$APPSTORE_PKG" --type macos ...   # see packaging/appstore/
+   $APPSTORE_PKG
 EOF
 fi
