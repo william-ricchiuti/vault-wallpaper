@@ -183,7 +183,8 @@ git push origin HEAD v1.0.0-beta.2
 `.github/workflows/release.yml` checks that the tag matches `crates/app/Cargo.toml`, imports
 the certificate, and runs `packaging/release.sh <version> --no-appstore`. That signs,
 notarizes with the API key and signs the appcast with `SPARKLE_PRIVATE_KEY`. Then it creates
-the GitHub Release (a pre-release if the version has a `-`) with the DMG and `appcast.xml`,
+the GitHub Release (a pre-release if the version has a `-`: Sparkle users aren't offered
+pre-releases, because the feed follows `releases/latest`) with the DMG and `appcast.xml`,
 and opens a cask bump PR in the tap. Merge that PR. Watch the run with `gh run watch`.
 
 Build the App Store package on the Mac (`packaging/appstore/build-appstore.sh`) and upload it

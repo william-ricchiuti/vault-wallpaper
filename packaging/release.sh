@@ -282,6 +282,15 @@ cat <<EOF
     pkg      $APPSTORE_PKG}
 EOF
 
+if [[ -n "$PRERELEASE" ]]; then
+  cat <<EOF
+
+    WARNING: $VERSION is a pre-release. GitHub's releases/latest (the Sparkle feed URL) skips
+    pre-releases, so Sparkle users won't be offered it, and Homebrew users will still get it.
+    To ship it as an update anyway, drop --prerelease from the gh command below.
+EOF
+fi
+
 if ((DRY_RUN)); then
   cat <<EOF
 

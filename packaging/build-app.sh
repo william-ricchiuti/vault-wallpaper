@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # Build "dist/Vault Wallpaper.app": a universal (Apple Silicon + Intel) app bundle.
 #
-# Usage: [VW_FEATURES=updater] packaging/build-app.sh
-#   VW_FEATURES: cargo features for the app crate (comma-separated), e.g. "updater" for the
-#   direct build with Sparkle. Unset or empty builds the default feature set.
+# Usage: packaging/build-app.sh
 # Needs: rustup, Xcode command line tools (lipo, iconutil, sips, plutil).
 # Output is unsigned; run packaging/sign.sh next.
 set -euo pipefail
@@ -50,14 +48,10 @@ done
 # `--target` produces proc-macro dylibs rustc can't load ("E0463 can't find crate for
 # `thiserror_impl`"). The binaries keep rustc's default minimums (11.0 arm64, 10.12 x86_64).
 unset MACOSX_DEPLOYMENT_TARGET
-FEATURE_ARGS=()
-if [[ -n "${VW_FEATURES:-}" ]]; then
-  FEATURE_ARGS=(--features "$VW_FEATURES")
-fi
 SLICES=()
 for t in "${TARGETS[@]}"; do
-  echo "==> cargo build --release -p $BIN_NAME --target $t ${FEATURE_ARGS[*]:-}"
-  cargo build --release --locked -p "$BIN_NAME" --target "$t" ${FEATURE_ARGS[@]+"${FEATURE_ARGS[@]}"}
+  echo "==> cargo build --release -p $BIN_NAME --target $t"
+  cargo build --release --locked -p "$BIN_NAME" --target "$t"
   SLICES+=("${CARGO_TARGET_DIR:-$ROOT/target}/$t/release/$BIN_NAME")
 done
 

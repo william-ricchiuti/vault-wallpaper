@@ -130,9 +130,9 @@ These are agreed between sessions. If you change one, change `release.sh` too.
 
 | Script | Owner | Call | Output |
 |---|---|---|---|
-| `build-app.sh` | packaging | `VW_FEATURES=<cargo features> build-app.sh` (empty: default features) | `dist/Vault Wallpaper.app` |
+| `build-app.sh` | packaging + Sparkle session | `VW_FEATURES` unset: direct build (`updater`, Sparkle.framework embedded); `VW_FEATURES=` (set, empty): App Store build, no Sparkle; any list containing `updater` embeds Sparkle. `release.sh` sets `VW_FEATURES=updater` explicitly | `dist/Vault Wallpaper.app` |
 | `notarize.sh` | packaging | `VW_NOTARY_PROFILE=<profile>`, or `VW_NOTARY_KEY_PATH` + `VW_NOTARY_KEY_ID` + `VW_NOTARY_ISSUER` (API key, used by CI) | the DMG, stapled |
-| `make-appcast.sh` | Sparkle session | `make-appcast.sh <dmg> <version> [--out <file>] [--unsigned]`. Key source, in order: `VW_SPARKLE_PRIVATE_KEY` (key string; CI's `SPARKLE_PRIVATE_KEY` secret), `VW_SPARKLE_KEY_FILE` (path), then the login Keychain | `dist/appcast.xml` |
+| `make-appcast.sh` | Sparkle session | `make-appcast.sh <dmg> [<version>] [--out <file>] [--unsigned]`; version defaults to the DMG app's `VWVersion`. Key source, in order: `VW_SPARKLE_PRIVATE_KEY` (base64 seed; CI's `SPARKLE_PRIVATE_KEY` secret), `VW_SPARKLE_KEY_FILE` (path), then the login Keychain. Prints the appcast path on its last stdout line | default `dist/appcast/appcast.xml`; `release.sh` passes `--out dist/appcast.xml` |
 | `appstore/build-appstore.sh` | App Store session | `build-appstore.sh [--dry-run]`; the version is already bumped | `dist/appstore/Vault-Wallpaper-<version>.pkg` |
 | `homebrew/bump-cask.sh` | release automation | `bump-cask.sh <version> <dmg> [tap-dir]` | edits `<tap-dir>/Casks/vault-wallpaper.rb` |
 
@@ -142,8 +142,11 @@ The feed (`SUFeedURL`) is
 `https://github.com/william-ricchiuti/vault-wallpaper/releases/latest/download/appcast.xml`,
 so every release uploads its own `appcast.xml`.
 
-A pre-release is not "latest". A beta's appcast is only seen by users on that feed once a
-stable release exists. Until 1.0.0 the Sparkle session decides how betas are offered.
+GitHub's `releases/latest` skips pre-releases, so a release published with `--prerelease`
+never reaches Sparkle users: their feed keeps pointing at the last stable release's
+appcast. `release.sh` warns about this for `-beta`/`-rc` versions. To ship a beta as an
+update, drop `--prerelease` from the printed `gh release create` command, which makes it
+"latest". CI marks every version with a `-` as a pre-release.
 
 ## Homebrew
 
