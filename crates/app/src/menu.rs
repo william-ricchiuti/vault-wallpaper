@@ -13,6 +13,7 @@ pub enum Action {
     OpenConfigFile,
     ExportPng,
     ToggleLogin,
+    CheckForUpdates,
     Quit,
 }
 
@@ -27,8 +28,8 @@ pub struct AppMenu {
 impl AppMenu {
     /// Builds the menu and icon. Call on the main thread once the event loop runs.
     /// Clicks are delivered to `on_event` (from AppKit's thread: forward them to the
-    /// event loop).
-    pub fn new(login_enabled: bool, on_event: impl Fn(MenuEvent) + Send + Sync + 'static) -> Option<Self> {
+    /// event loop). `updates` adds "Check for Updates…" (only when Sparkle is loaded).
+    pub fn new(login_enabled: bool, updates: bool, on_event: impl Fn(MenuEvent) + Send + Sync + 'static) -> Option<Self> {
         let menu = Menu::new();
         let status = MenuItem::new("Vault Wallpaper", false, None);
         let pause = CheckMenuItem::new("Pause Wallpaper", true, false, None);
@@ -38,10 +39,16 @@ impl AppMenu {
         let config = MenuItem::new("Open Config File", true, None);
         let export = MenuItem::new("Export PNG", true, None);
         let login = CheckMenuItem::new("Start at Login", true, login_enabled, None);
+        let check = MenuItem::new("Check for Updates…", true, None);
         let quit = MenuItem::new("Quit Vault Wallpaper", true, None);
         let sep = PredefinedMenuItem::separator;
-        menu.append_items(&[&status, &sep(), &pause, &settings, &vault, &import, &sep(), &export, &config, &login, &sep(), &quit]).ok()?;
+        menu.append_items(&[&status, &sep(), &pause, &settings, &vault, &import, &sep(), &export, &config, &login, &sep()]).ok()?;
+        if updates {
+            menu.append(&check).ok()?;
+        }
+        menu.append(&quit).ok()?;
         let ids = vec![
+            (check.id().clone(), Action::CheckForUpdates),
             (pause.id().clone(), Action::TogglePause),
             (settings.id().clone(), Action::OpenSettings),
             (vault.id().clone(), Action::ChooseVault),
