@@ -32,7 +32,17 @@ export V=1.0.0-beta.1
    `vault-wallpaper` public, or publish releases from a separate public repo and change `url`
    in the cask. Homebrew can't read release assets of a private repo.
 
-4. **[William]** Create the tap repo `william-ricchiuti/homebrew-tap` (public, empty, with a
+4. **[William]** Sparkle update key (once; details in `packaging/README.md`, "Updates"):
+
+   ```bash
+   packaging/sparkle-keys.sh                       # private key -> login Keychain, prints the public key
+   packaging/sparkle-keys.sh -x ~/sparkle-key.txt  # backup: store in a password manager, then delete the file
+   ```
+
+   Put the printed public key in `packaging/sparkle.env` (`SPARKLE_PUBLIC_ED_KEY=...`) and
+   commit it. Until then builds have the updater switched off.
+
+5. **[William]** Create the tap repo `william-ricchiuti/homebrew-tap` (public, empty, with a
    `Casks/` folder). `brew tap william-ricchiuti/tap` finds it by that name.
 
 ## 1. Prepare the release (anyone)
@@ -101,6 +111,21 @@ hdiutil detach "/Volumes/Vault Wallpaper"
 
 Both should say `accepted` with `source=Notarized Developer ID`.
 
+## 5b. Appcast **[William]** (uses the Sparkle private key)
+
+Only after notarizing and stapling: the appcast signs the DMG's final bytes.
+
+```bash
+mkdir -p dist/appcast
+# keep the feed's history: start from the current appcast, if there is one
+curl -fsSL -o dist/appcast/appcast.xml \
+  https://github.com/william-ricchiuti/vault-wallpaper/releases/latest/download/appcast.xml || true
+packaging/make-appcast.sh "dist/Vault-Wallpaper-$V.dmg" "$V"
+```
+
+Check `dist/appcast/appcast.xml`: the new `<item>` has `sparkle:version` (the build number),
+`sparkle:edSignature`, and an enclosure URL ending `/releases/download/v$V/Vault-Wallpaper-$V.dmg`.
+
 ## 6. Smoke test the notarized build (anyone, on William's Mac or a test account)
 
 Install from the DMG to `/Applications`, then:
@@ -109,17 +134,29 @@ Install from the DMG to `/Applications`, then:
 - Start at Login: tick it, then check System Settings > General > Login Items lists
   Vault Wallpaper. Untick it again.
 - Settings… opens; Export PNG writes `~/Pictures/Vault Wallpaper/vault-wallpaper-*.png`.
+- Check for Updates… is in the menu (it is missing if the public key is still the placeholder).
+  After the release is published, it says the app is up to date.
 
 ## 7. GitHub Release **[William]** (publishes)
 
 ```bash
 git tag -a "v$V" -m "Vault Wallpaper $V"
 git push origin "v$V"
-gh release create "v$V" "dist/Vault-Wallpaper-$V.dmg" \
+gh release create "v$V" "dist/Vault-Wallpaper-$V.dmg" dist/appcast/appcast.xml \
   --title "Vault Wallpaper $V" \
   --notes-file <(awk -v v="$V" '$0 ~ "^## \\[" v "\\]" {on=1; next} /^## \[/ {on=0} on' CHANGELOG.md) \
   --prerelease            # drop --prerelease for 1.0.0
 gh release view "v$V"
+```
+
+Installed copies find the update through
+`https://github.com/william-ricchiuti/vault-wallpaper/releases/latest/download/appcast.xml`,
+which follows the newest release that is **not** a pre-release. A `--prerelease` release
+reaches nobody through Sparkle; publish without `--prerelease` when a beta should update
+existing installs. Check:
+
+```bash
+curl -fsSIL https://github.com/william-ricchiuti/vault-wallpaper/releases/latest/download/appcast.xml | grep -i '^location'
 ```
 
 ## 8. Homebrew cask **[William]** (publishes)

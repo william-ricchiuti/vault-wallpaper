@@ -51,6 +51,7 @@ menu to bring your old `config.json` and custom presets over. See
 | Export PNG | Saves the current picture to `~/Pictures/Vault Wallpaper/` and shows it in Finder. |
 | Open Config File | Opens `config.json` in your text editor; edits apply when you save. |
 | Start at Login | Opens Vault Wallpaper when you log in. |
+| Check for Updates… | Looks for a newer version now (DMG and Homebrew installs; the App Store updates its own copy). |
 
 ## Themes
 
@@ -82,8 +83,20 @@ and motion.
 ## Privacy
 
 Everything stays on your Mac. Vault Wallpaper reads your vault's Markdown files to find notes,
-links and tags, and never changes them. It makes no network connections: no analytics, no
-crash reports, no update checks. Its own files are:
+links and tags, and never changes them. No analytics, no crash reports, no account.
+
+The one network request: the DMG and Homebrew versions check for updates once a day, with
+[Sparkle](https://sparkle-project.org). That is one small HTTPS request for a short
+`appcast.xml` file on GitHub, which sends nothing about you or your vault beyond what any web
+request carries (your IP address and the app's version in the user agent). Nothing else runs
+in between. An update is downloaded only when there is one, and installed only after its
+signature checks out. Turn the daily check off in the update window ("Automatically check
+for updates") or with
+`defaults write com.williamricchiuti.vaultwallpaper SUEnableAutomaticChecks -bool NO`; the
+menu's Check for Updates… still works. The Mac App Store version has no updater and makes no
+network requests.
+
+Its own files are:
 
 - `~/Library/Application Support/Vault Wallpaper/`: `config.json`, `custom-presets.json` and
   the cached layout (`layout.json`).

@@ -6,6 +6,11 @@ All notable changes to Vault Wallpaper. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Automatic updates for the DMG and Homebrew versions (Sparkle 2): one small HTTPS check a
+  day, and Check for Updates… in the menu. The Mac App Store build has no updater.
+
 ## [1.0.0-beta.1] - unreleased
 
 The first beta of the native macOS app, a rewrite of the web version
