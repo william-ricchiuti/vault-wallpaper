@@ -364,8 +364,56 @@ mains power), before → after: `--front` 0.2% CPU, 97 MB → 0.2%, 97 MB; deskt
   draws the right picture within ~5 s (82 MB).
 - Finding: **any full redraw** (edit, config change, theme change) briefly spikes process memory
   to ~316 MB for about a second, then it settles around 150 MB. It is the graphics driver's
-  working memory for a full Retina scene redraw, not the bursts. Worth trimming (lower-resolution
-  internal passes, fewer full-size intermediate textures, reusing targets).
+  working memory for a full Retina scene redraw, not the bursts. Trimmed the same day: see
+  "Redraw memory" below.
+
+#### Redraw memory (2026-11-07, branch `claude/redraw-spike-8eed29`)
+**Cause.** On Apple GPUs the Metal driver gives each process two working pools, made dirty
+when GPU work is submitted and released ~1–3 s after the GPU goes idle: ~100 MB for render
+passes and presents, and a separate ~72 MB one for copy (blit) and compute work. Both are
+flat: one 1×1 clear costs the same 100 MB as a full Retina pass with 100k instances, and
+encoder or command-buffer counts don't change them. A bare Swift Metal program shows the
+same numbers, so this is the driver, not wgpu. Our redraw used both pools, because every
+`queue.write_buffer` (instance buffers, uniforms, glyphon's vertices) is a copy command.
+On top of that, the CAMetalLayer kept a second full-screen drawable (+24 MB) for good after
+its second present, and the cached scene and glow textures (~30 MB) stayed between redraws.
+
+**Changes.**
+- No copy commands in a redraw: buffers are created mapped and written by the CPU
+  (`Gpu::buffer_with`, `MAPPABLE_PRIMARY_BUFFERS`, which unified memory supports), with
+  bind groups rebuilt per redraw. glyphon is vendored (`vendor/glyphon/PATCHES.md`) with
+  the same change for its glyph vertices.
+- The composite goes into a new IOSurface shown as a plain layer's contents
+  (`overlay::SceneLayer`); the old one is freed once the new one is up. The wgpu surface
+  stays configured as the fallback but never presents, so it never allocates drawables.
+- The scene and glow textures are freed after each composite
+  (`WallpaperRenderer::release_targets`): the composite always follows a scene redraw.
+
+**Measured** (fixture vault, `--front`, Pulse, `motionMode: still`, M3 Pro at 3024×1964;
+`footprint` every 0.25 s, settled 15 s after the change; two runs each, `main` at 551529e
+vs this branch):
+
+| | Idle | Peak | Above idle for | Settled (15 s) | Draw call |
+|---|---|---|---|---|---|
+| Config change (`grain`), before | 81–82 MB | 314 MB | ~1 s at 314, then ~210 MB for 3+ s | 107–136 MB | 2–4 ms (CPU only; present returns before the GPU is done) |
+| Config change, after | 52 MB | 217 MB | ~1 s at 187–217, then 130–160 MB for 1–3 s | 54–70 MB | 10–12 ms (to GPU completion) |
+| Edit, before | 81–82 MB | 309–314 MB | ~1 s, then ~190–207 MB for 1–3 s | 107–132 MB | 2–4 ms (CPU only) |
+| Edit, after | 52 MB | 216–217 MB | ~1 s, then ~160 MB for 1–3 s | 53–54 MB | 11–64 ms (to GPU completion) |
+| Theme change (Pulse → Ink & Paper), before | 82 MB | 296–297 MB | ~1 s, then ~165–234 MB for 3+ s | 105–117 MB | 2–4 ms (CPU only) |
+| Theme change, after | 52 MB | 179 MB | ~1 s | 52 MB | 10–26 ms (to GPU completion) |
+
+Driver graphics memory at the peak: 215 MB before, 113 MB after (the render pool plus
+what's drawn). The look is unchanged: `render_vault` PNGs of the real vault are
+byte-identical before and after for all five looks (and Pulse and ink-bleed bursts), and
+screen captures of the running app are pixel-identical for all five.
+
+**Tried, no help.** Configuring the surface to 1×1 between draws to drop the second drawable
+(the layer kept it). Fewer command buffers or encoders, `maxCommandBufferCount: 1`, a
+smaller render target (the pools don't depend on any of these). A `StagingBelt` would still
+be a copy. **Left:** the ~100 MB render pool for ~1–3 s is the floor for any drawing or
+presenting from this process. Bursts still wake the copy pool (the bake reads its atlas back
+with a copy), and so does a text change that rasterises new glyphs (glyphon's
+`write_texture`).
 
 ### Phase 7: Packaging and release (S–M)
 **You get:** a download that opens with no warnings and keeps itself up to date.
