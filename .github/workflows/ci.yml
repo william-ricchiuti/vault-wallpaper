@@ -3,13 +3,22 @@
 #
 # Cost: free on a public repo. On a private repo, macOS minutes count 10x against the free
 # 2,000 minutes a month (GitHub Free), so about 200 real macOS minutes. One run is roughly
-# 8-15 minutes (less with a warm cache), so about 15-25 PR runs a month. That's why this is
-# one job (one runner start-up and one shared cache), pull requests only, and why a new push
-# cancels the run still going for the same PR.
+# 8-15 minutes (less with a warm cache), so about 15-25 runs a month. That's why this is
+# one job (one runner start-up and one shared cache), only pull requests and merges to main,
+# and why a new push cancels the run still going for the same PR.
 name: CI
 
 on:
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "obsidian-plugin/**"
+  # Pushes to main run it too, only so the Rust cache gets saved (save-if below): PR runs
+  # restore main's cache but never write one. On a private repo each such run also costs
+  # minutes (docs/release-checklist.md, "Cost of CI").
+  push:
+    branches: [main]
     paths-ignore:
       - "**.md"
       - "docs/**"
@@ -38,13 +47,15 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned to a commit, so the toolchain has to be named (it isn't taken from the ref).
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-11-08
         with:
+          toolchain: stable
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # Only main writes the cache, so PRs don't evict each other's (10 GB cap per repo).
           save-if: ${{ github.ref == 'refs/heads/main' }}

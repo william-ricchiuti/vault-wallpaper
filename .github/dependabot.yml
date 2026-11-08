@@ -1,0 +1,14 @@
+# Keeps the commit-pinned GitHub Actions in .github/workflows/ current: Dependabot opens a PR
+# that moves each pin (and its version comment) to a new release. Monthly, so on a private
+# repo the PRs' CI runs stay few (docs/release-checklist.md, "Cost of CI").
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
