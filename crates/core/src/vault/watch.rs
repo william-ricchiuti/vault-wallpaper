@@ -10,7 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use notify::RecursiveMode;
-use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
+use notify_debouncer_full::{DebounceEventResult, Debouncer, NoCache, new_debouncer_opt};
 
 use super::{Graph, Vault};
 
@@ -19,7 +19,7 @@ pub const DEBOUNCE: Duration = Duration::from_millis(100);
 
 /// Keeps the watch alive; dropping it stops watching.
 pub struct VaultWatcher {
-    _debouncer: Debouncer<notify::RecommendedWatcher, RecommendedCache>,
+    _debouncer: Debouncer<notify::RecommendedWatcher, NoCache>,
     _worker: thread::JoinHandle<()>,
 }
 
@@ -33,7 +33,10 @@ pub fn watch(mut vault: Vault, on_graph: impl Fn(Graph) + Send + 'static) -> not
     // `None` asks for a full rescan; `Some` carries changed paths.
     let (tx, rx) = mpsc::channel::<Option<Vec<PathBuf>>>();
 
-    let mut debouncer = new_debouncer(DEBOUNCE, None, move |result: DebounceEventResult| match result {
+    // No file-id cache: it only pairs up the two halves of a rename, which the vault
+    // doesn't need (both paths are refreshed either way), and building it walks the
+    // whole vault again on top of the scan.
+    let handler = move |result: DebounceEventResult| match result {
         Ok(events) => {
             if events.iter().any(|e| e.event.need_rescan()) {
                 let _ = tx.send(None);
@@ -58,7 +61,8 @@ pub fn watch(mut vault: Vault, on_graph: impl Fn(Graph) + Send + 'static) -> not
                 eprintln!("watcher error: {e}");
             }
         }
-    })?;
+    };
+    let mut debouncer = new_debouncer_opt::<_, notify::RecommendedWatcher, NoCache>(DEBOUNCE, None, handler, NoCache, notify::Config::default())?;
     debouncer.watch(vault.root(), RecursiveMode::Recursive)?;
 
     let worker = thread::spawn(move || {
