@@ -356,6 +356,17 @@ Cost, same `phase0/measure.sh` run (25 s warm-up, 30 s window, real vault, defau
 mains power), before → after: `--front` 0.2% CPU, 97 MB → 0.2%, 97 MB; desktop 0.2%, 97 MB →
 0.2%, 96 MB. No change.
 
+#### Live checks (2026-11-07, `main` at c6b53f2, display awake)
+- Edit bursts (Pulse, Ink & Paper): play with no frames presented, ~0.05 s CPU each.
+- Obsidian plugin (simulated `state.json`): a reported save triggers a burst within ~0.1 s; the
+  active note gets its label and highlight (window screenshots before and after).
+- Launch with the display asleep: 0 screens at start; on wake the app adds the display and
+  draws the right picture within ~5 s (82 MB).
+- Finding: **any full redraw** (edit, config change, theme change) briefly spikes process memory
+  to ~316 MB for about a second, then it settles around 150 MB. It is the graphics driver's
+  working memory for a full Retina scene redraw, not the bursts. Worth trimming (lower-resolution
+  internal passes, fewer full-size intermediate textures, reusing targets).
+
 ### Phase 7: Packaging and release (S–M)
 **You get:** a download that opens with no warnings and keeps itself up to date.
 - Universal binary (Apple Silicon + Intel), app bundle and `Info.plist`, icon.
