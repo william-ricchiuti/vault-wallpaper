@@ -154,5 +154,33 @@ App Store Connect, and the last steps publish.
 - **Minimum OS:** the binary's own minimum is older than the 13.0 in `Info.plist` (see
   `../README.md` on `MACOSX_DEPLOYMENT_TARGET`). That is allowed; if validation ever objects,
   that is the place to look.
+- **Private API (ITMS-90338).** Checked 2026-11-08 on the `--dry-run` binary:
+  - *Imported symbols* (`nm -u`, 369): every one is in the public macOS SDK headers, apart
+    from compiler and runtime ABI symbols every app has (`objc_retain`/`release`/`autorelease*`,
+    weak-reference and exception symbols, `dyld_stub_binder`, `realpath$DARWIN_EXTSN`). The
+    private SkyLight imports `_CGSMainConnectionID` and `_CGSSetWindowBackgroundBlurRadius`
+    came from winit's unused blur support and are patched out (`vendor/winit/PATCHES.md`).
+    `_CGShieldingWindowLevel` is public CoreGraphics. To re-check:
+    `nm -u "dist/appstore/Vault Wallpaper.app/Contents/MacOS/vault-wallpaper" | grep -E "CGS|_SL"`
+    must print only `_CGShieldingWindowLevel`.
+  - *Objective-C selectors:* the binary has no `__objc_selrefs`/`__objc_methname` sections
+    (objc2 registers selectors at runtime), so there are no selector references for the
+    scanner to read. Some private names exist only as plain strings: winit's undocumented
+    `NSCursor` class methods (`_helpCursor`, `_zoomInCursor`, `_windowResize…Cursor`, only
+    called when the app sets those cursor icons, which it doesn't) and its
+    `_wantsKeyDownForEvent:` override on its view.
+  - *WebKit settings in wry 0.57.1* (the settings window). The app no longer calls
+    `with_background_color`, so the private `drawsBackground` key is never set; the window
+    background and a hidden-until-loaded web view prevent the white flash instead. Two keys
+    remain and wry has no option to turn them off (0.57.1 is the newest wry):
+    `allowsPictureInPictureMediaPlayback` on `WKPreferences`, set for every web view, and
+    `fullScreenEnabled`, set only on macOS before 12.3, so never under our 13.0 minimum
+    (wry uses the public `elementFullscreenEnabled` there). Both are key-value-coding strings,
+    not symbols or selectors. If App Review asks, a suggested answer: *"The settings window
+    is a WKWebView created by the open-source wry library. It sets the WKPreferences key
+    allowsPictureInPictureMediaPlayback through key-value coding, a media-playback setting
+    our local settings page never uses. The app calls no private API itself. We can remove
+    the setting in the next build if required."* If it comes to that, vendor wry like
+    `vendor/winit` and delete the `setValue_forKey` for that key in `src/wkwebview/mod.rs`.
 - **Name:** "Vault Wallpaper" may be taken on the store; fallbacks are in `listing.md`. Don't
   put "Obsidian" in the name or keywords (someone else's trademark, guideline 5.2.1).

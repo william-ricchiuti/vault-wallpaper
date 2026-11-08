@@ -41,23 +41,28 @@
 
 mod api;
 
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use objc2::{MainThreadMarker, MainThreadOnly, sel};
-use objc2_app_kit::{NSApplication, NSAutoresizingMaskOptions, NSMenu, NSMenuItem};
+use objc2::rc::Retained;
+use objc2_app_kit::{NSApplication, NSAutoresizingMaskOptions, NSColor, NSMenu, NSMenuItem};
 use objc2_foundation::NSString;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowId};
-use wry::{WebView, WebViewBuilder, WebViewExtMacOS};
+use wry::{PageLoadEvent, WebView, WebViewBuilder, WebViewExtMacOS, WryWebView};
 
 use api::Backend;
 
 /// The page's address. The scheme is registered for this web view only.
 const START_URL: &str = "vw://app/settings.html";
 const SCHEME: &str = "vw";
+/// The page's dark background (`--bg` in `settings.html`), as sRGB.
+const PAGE_BG: (f64, f64, f64) = (14.0 / 255.0, 14.0 / 255.0, 20.0 / 255.0);
 
 #[derive(Debug)]
 pub enum SettingsError {
@@ -95,7 +100,9 @@ impl SettingsWindow {
         let attrs = Window::default_attributes()
             .with_title("Vault Wallpaper Settings")
             .with_inner_size(LogicalSize::new(980.0, 820.0))
-            .with_min_inner_size(LogicalSize::new(480.0, 400.0));
+            .with_min_inner_size(LogicalSize::new(480.0, 400.0))
+            // Shown once its background is set (below), so it never appears white.
+            .with_visible(false);
         let window = event_loop
             .create_window(attrs)
             .map_err(SettingsError::Window)?;
@@ -103,6 +110,13 @@ impl SettingsWindow {
         let backend = Arc::new(Mutex::new(Backend::new(config_path)));
         let handler = Arc::clone(&backend);
         let size = window.inner_size();
+        // No white flash, without wry's `with_background_color`: that sets WebKit's
+        // private `drawsBackground` key, which the App Store scanner can flag. Instead the
+        // window has the page's dark background, and the web view stays hidden until the
+        // page has loaded (its CSS paints the same colour), so WebKit's white
+        // first-frame background is never on screen.
+        let shown: Rc<RefCell<Option<Retained<WryWebView>>>> = Rc::default();
+        let on_load = Rc::clone(&shown);
         let webview = WebViewBuilder::new()
             .with_bounds(wry::Rect {
                 position: PhysicalPosition::new(0, 0).into(),
@@ -112,8 +126,17 @@ impl SettingsWindow {
                 Ok(b) => b.handle(&req),
                 Err(poisoned) => poisoned.into_inner().handle(&req),
             })
-            // Matches the page's dark background, so opening doesn't flash white.
-            .with_background_color((14, 14, 20, 255))
+            .with_visible(false)
+            .with_on_page_load_handler(move |event, _url| {
+                if let PageLoadEvent::Finished = event
+                    && let Some(view) = on_load.borrow_mut().take()
+                {
+                    view.setHidden(false);
+                    if let Some(w) = view.window() {
+                        w.makeFirstResponder(Some(&view));
+                    }
+                }
+            })
             .with_url(START_URL)
             // `window.ipc.postMessage(text)` from the page goes to stderr: page errors
             // and the example's scripted checks report through it.
@@ -135,6 +158,12 @@ impl SettingsWindow {
         );
         // Keyboard focus in the page from the start (Tab, typing), not in winit's view.
         let _ = webview.focus();
+        *shown.borrow_mut() = Some(webview.webview());
+        let (r, g, b) = PAGE_BG;
+        webview
+            .ns_window()
+            .setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0)));
+        window.set_visible(true);
 
         if let Some(mtm) = MainThreadMarker::new() {
             install_edit_menu(mtm);
