@@ -142,6 +142,11 @@ brew install --cask william-ricchiuti/tap/vault-wallpaper
 
 Users then install with `brew install --cask william-ricchiuti/tap/vault-wallpaper`.
 
+## Mac App Store
+
+The App Store build is separate: build, sign and upload with
+[`packaging/appstore/README.md`](../packaging/appstore/README.md) ("Each release").
+
 ## 9. After the release
 
 - Point the web version's README at the release (Phase 8; that repo is separate).
