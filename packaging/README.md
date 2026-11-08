@@ -96,8 +96,8 @@ submission comes back "Invalid", read Apple's reason with
 ## Mac App Store
 
 A sandboxed build without the self-updater, signed for the store and packaged with
-`productbuild`, is in [`appstore/`](appstore/README.md): `VW_APPSTORE_ADHOC=1
-packaging/appstore/build.sh` for a local test, and the steps William takes in App Store
+`productbuild`, is in [`appstore/`](appstore/README.md): `packaging/appstore/build.sh
+--dry-run` for a local test, and the steps William takes in App Store
 Connect.
 
 ## Release

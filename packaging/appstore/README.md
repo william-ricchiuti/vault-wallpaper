@@ -64,7 +64,7 @@ networking with encryption (HTTPS through the OS still counts as exempt), revisi
 ## Local test (anyone)
 
 ```bash
-VW_APPSTORE_ADHOC=1 packaging/appstore/build.sh
+packaging/appstore/build.sh --dry-run
 codesign -d --entitlements :- "dist/appstore/Vault Wallpaper.app"
 packaging/appstore/sandbox-check.sh
 ```

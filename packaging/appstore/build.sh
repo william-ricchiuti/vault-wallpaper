@@ -3,7 +3,8 @@
 # "dist/appstore/Vault Wallpaper.app" and the installer package App Store Connect takes.
 #
 # Usage:
-#   VW_APPSTORE_ADHOC=1 packaging/appstore/build.sh            # local test: ad-hoc signature, unsigned .pkg
+#   packaging/appstore/build.sh --dry-run                       # local test: ad-hoc signature, unsigned .pkg
+#                                                               # (same as VW_APPSTORE_ADHOC=1)
 #   VW_TEAM_ID=ABCDE12345 \
 #   VW_APP_IDENTITY="Apple Distribution: Name (ABCDE12345)" \
 #   VW_INSTALLER_IDENTITY="3rd Party Mac Developer Installer: Name (ABCDE12345)" \
@@ -14,6 +15,7 @@
 # The app is built with --no-default-features: no self-updater (the `updater` feature,
 # Sparkle) in an App Store build; the store updates it.
 # Uploading is a separate, manual step (Transporter or `xcrun altool`); see packaging/appstore/README.md.
+# The last line on stdout is the .pkg path (for packaging/release.sh); everything else is progress.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -33,6 +35,12 @@ WORK="$OUT/.work"
 ENTITLEMENTS="$HERE/entitlements.plist"
 
 ADHOC="${VW_APPSTORE_ADHOC:-}"
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) ADHOC=1 ;;
+    *) echo "unknown argument: $arg (only --dry-run)" >&2; exit 64 ;;
+  esac
+done
 if [[ -z "$ADHOC" ]]; then
   missing=()
   for v in VW_TEAM_ID VW_APP_IDENTITY VW_INSTALLER_IDENTITY VW_PROVISIONING_PROFILE; do
@@ -198,4 +206,4 @@ echo "==> entitlements in the signature"
 codesign -d --entitlements :- "$APP" 2>/dev/null
 rm -rf "$WORK"
 echo "==> built: $APP"
-echo "==>        $PKG"
+echo "$PKG"

@@ -3,7 +3,7 @@
 # inside the App Sandbox. Some steps need a person: the sandbox's open panel only accepts
 # real clicks, and the menu-bar menu can't be scripted.
 #
-# Usage: VW_APPSTORE_ADHOC=1 packaging/appstore/build.sh && packaging/appstore/sandbox-check.sh
+# Usage: packaging/appstore/build.sh --dry-run && packaging/appstore/sandbox-check.sh
 #
 # It reads, never deletes, the container at
 # ~/Library/Containers/com.williamricchiuti.vaultwallpaper. For a true first run, quit the app
@@ -25,7 +25,7 @@ yes()  { local a; read -r -p "  -> $* [y/n] " a; [[ "$a" == y* ]]; }
 quit() { pkill -f "$BIN" 2>/dev/null; sleep 1; }
 launch() { : >"$ERR"; open --stderr "$ERR" "$APP"; sleep "${1:-4}"; }
 
-[[ -x "$BIN" ]] || { echo "no app at $APP; run VW_APPSTORE_ADHOC=1 packaging/appstore/build.sh" >&2; exit 1; }
+[[ -x "$BIN" ]] || { echo "no app at $APP; run packaging/appstore/build.sh --dry-run" >&2; exit 1; }
 echo "== signature"
 ENT="$(codesign -d --entitlements :- "$APP" 2>/dev/null)"
 grep -q com.apple.security.app-sandbox <<<"$ENT" && ok "sandbox entitlement present" || bad "not sandboxed"
