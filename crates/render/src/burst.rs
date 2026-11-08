@@ -209,8 +209,7 @@ const KINDS: [BurstKind; 4] = [BurstKind::InkBleed, BurstKind::PulseRing, BurstK
 /// pays nothing for it.
 pub struct BurstRenderer {
     pipelines: Vec<(BurstKind, wgpu::RenderPipeline)>,
-    uniforms: wgpu::Buffer,
-    bind: wgpu::BindGroup,
+    layout: wgpu::BindGroupLayout,
     buf: Option<wgpu::Buffer>,
 }
 
@@ -274,13 +273,7 @@ impl BurstRenderer {
                 (k, pipeline(fs))
             })
             .collect();
-        let uniforms = crate::uniform_buffer::<BurstUniforms>(device, "burst uniforms");
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() }],
-        });
-        BurstRenderer { pipelines, uniforms, bind, buf: None }
+        BurstRenderer { pipelines, layout, buf: None }
     }
 
     /// Draws every frame of every actor into one atlas at `scale` pixels per point,
@@ -320,13 +313,17 @@ impl BurstRenderer {
         });
         let points = [size[0] as f32 / scale, size[1] as f32 / scale];
         let u = BurstUniforms { origin: [0.0; 2], size: points, scale, _pad: [0.0; 3] };
-        gpu.queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&u));
+        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: crate::uniform_with(gpu, "burst uniforms", &u).as_entire_binding() }],
+        });
         crate::instance_buffer(gpu, &mut self.buf, &instances, "burst sprites");
         let view = texture.create_view(&Default::default());
         let mut enc = gpu.device.create_command_encoder(&Default::default());
         {
             let mut pass = crate::begin(&mut enc, &view, "burst bake");
-            pass.set_bind_group(0, &self.bind, &[]);
+            pass.set_bind_group(0, &bind, &[]);
             if let Some(buf) = &self.buf {
                 pass.set_vertex_buffer(0, buf.slice(..));
                 for (kind, range) in ranges.into_iter().filter(|(_, r)| !r.is_empty()) {

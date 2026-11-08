@@ -7,9 +7,10 @@
 //! overrides the vault path.
 //!
 //! Threads: the vault watcher, the config watcher and the layout engine run in the
-//! background and post results to the main thread. The main thread redraws the cached
-//! scene only when something changed, and runs cheap composite-only frames while glow
-//! breathes. Saving a note can start a short edit burst (Ink & Paper's ink bleed,
+//! background and post results to the main thread. The main thread redraws the scene
+//! only when something changed, into a new IOSurface shown as a plain layer's contents
+//! (`overlay::SceneLayer`), then frees the full-resolution intermediate textures; glow
+//! breathing is a Core Animation opacity animation on its own layer. Saving a note can start a short edit burst (Ink & Paper's ink bleed,
 //! Pulse's travelling light): baked once into a small atlas and played by Core
 //! Animation over the still scene, with no app frames; when it ends its layers are
 //! removed. A settled, still wallpaper draws nothing at all.
@@ -37,7 +38,7 @@ use displays::Geom;
 use menu::{Action, AppMenu};
 use power::PowerState;
 use system::SysEvent;
-use overlay::{BurstOverlay, GlowOverlay};
+use overlay::{BurstOverlay, GlowOverlay, SCENE_LAYER_FORMAT, SceneLayer, SceneTarget};
 use presence::Presence;
 use settings::SettingsWindow;
 use tray_icon::menu::MenuEvent;
@@ -122,6 +123,12 @@ fn load_config(path: &std::path::Path) -> Config {
     }
 }
 
+/// Where a screen's composite goes.
+enum Output {
+    Layer(SceneTarget),
+    Frame(wgpu::SurfaceTexture),
+}
+
 /// One wallpaper window (one per display).
 struct Screen {
     /// The display this window covers.
@@ -140,6 +147,9 @@ struct Screen {
     visible: bool,
     /// Edit bursts' layers, made on the first burst this screen shows.
     burst_overlay: Option<BurstOverlay>,
+    /// The composited scene as a plain layer's contents; `None` falls back to
+    /// presenting on `surface`.
+    scene_layer: Option<SceneLayer>,
     /// The running bursts must be (re)baked and started on this screen (bursts
     /// started, or the scene moved under them).
     bursts_dirty: bool,
@@ -162,6 +172,9 @@ impl Screen {
             self.config.width = w;
             self.config.height = h;
             self.surface.configure(&gpu.device, &self.config);
+        }
+        if let (Some(l), Some(win)) = (&self.scene_layer, &self.ns_window) {
+            l.fit(win);
         }
         if let (Some(o), Some(win)) = (&self.overlay, &self.ns_window) {
             o.fit(win);
@@ -521,6 +534,12 @@ impl App {
             color_space: Default::default(),
         };
         surface.configure(&gpu.device, &config);
+        // The scene layer goes in first, under the glow and burst layers. The wgpu
+        // surface stays configured (it keeps the view layer-backed, and is the
+        // fallback) but presents nothing, so it never allocates a drawable.
+        let scene_layer = (format == SCENE_LAYER_FORMAT)
+            .then(|| ns_window.as_deref().and_then(SceneLayer::new))
+            .flatten();
         let renderer = WallpaperRenderer::new(gpu, format);
         let overlay = ns_window.as_deref().and_then(|w| GlowOverlay::new(gpu, w, format));
         if overlay.is_none() {
@@ -538,6 +557,7 @@ impl App {
             frame_dirty: true,
             visible: true,
             burst_overlay: None,
+            scene_layer,
             bursts_dirty: false,
         });
     }
@@ -576,21 +596,33 @@ impl App {
         fit: displays::Fit,
         breathing: Option<(f32, f32, f32)>,
     ) {
-        let frame = match s.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-            wgpu::CurrentSurfaceTexture::Occluded => {
-                s.visible = false;
-                return;
-            }
-            other => {
-                eprintln!("surface: {other:?}");
-                s.surface.configure(&gpu.device, &s.config);
-                return;
-            }
+        let t0 = Instant::now();
+        let size = [s.config.width, s.config.height];
+        // Where the composite goes: a fresh surface for the scene layer, or else the
+        // window's wgpu surface.
+        let target = match &s.scene_layer {
+            Some(layer) => match layer.target(gpu, size) {
+                Some(t) => Output::Layer(t),
+                None => {
+                    eprintln!("scene layer: no surface");
+                    return;
+                }
+            },
+            None => match s.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => Output::Frame(f),
+                wgpu::CurrentSurfaceTexture::Occluded => {
+                    s.visible = false;
+                    return;
+                }
+                other => {
+                    eprintln!("surface: {other:?}");
+                    s.surface.configure(&gpu.device, &s.config);
+                    return;
+                }
+            },
         };
         let scale = s.window.scale_factor() as f32;
-        let size = [s.config.width, s.config.height];
-        if s.scene_dirty {
+        if s.scene_dirty || !s.renderer.has_targets() {
             let points = [size[0] as f32 / scale, size[1] as f32 / scale];
             let data = match shown {
                 Some(sh) => {
@@ -604,7 +636,10 @@ impl App {
             // Notes may have moved under running bursts.
             s.bursts_dirty |= s.burst_overlay.is_some();
         }
-        let view = frame.texture.create_view(&Default::default());
+        let view = match &target {
+            Output::Layer(t) => t.texture.create_view(&Default::default()),
+            Output::Frame(f) => f.texture.create_view(&Default::default()),
+        };
         match &mut s.overlay {
             Some(o) => {
                 s.renderer.composite_scene_only(gpu, &view, style);
@@ -613,8 +648,23 @@ impl App {
             }
             None => s.renderer.composite(gpu, &view, style, 1.0),
         }
-        s.window.pre_present_notify();
-        gpu.queue.present(frame);
+        drop(view);
+        match target {
+            Output::Layer(t) => {
+                if let Some(layer) = &mut s.scene_layer {
+                    layer.show(gpu, t);
+                }
+                // The composite only ever follows a scene redraw, so the cached
+                // full-resolution textures (~30 MB on Retina) are not kept between
+                // redraws; the driver gives their memory back when it goes idle.
+                s.renderer.release_targets();
+            }
+            Output::Frame(f) => {
+                s.window.pre_present_notify();
+                gpu.queue.present(f);
+            }
+        }
+        eprintln!("scene drawn in {:.1} ms", t0.elapsed().as_secs_f64() * 1000.0);
         s.frame_dirty = false;
     }
 

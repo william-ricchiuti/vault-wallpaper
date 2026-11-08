@@ -1,0 +1,24 @@
+# glyphon 0.12.0 from crates.io, vendored with one change: glyph vertices go into a
+# new buffer created mapped (MAP_WRITE, when the device has MAPPABLE_PRIMARY_BUFFERS)
+# instead of `queue.write_buffer`, so a text change needs no GPU copy. See
+# PATCHES.md and `Gpu::buffer_with` in crates/render.
+[package]
+edition = "2021"
+name = "glyphon"
+version = "0.12.0"
+description = "Fast, simple 2D text rendering for wgpu"
+homepage = "https://github.com/grovesNL/glyphon.git"
+readme = "README.md"
+license = "MIT OR Apache-2.0 OR Zlib"
+repository = "https://github.com/grovesNL/glyphon"
+
+[lib]
+name = "glyphon"
+path = "src/lib.rs"
+
+[dependencies]
+cosmic-text = "0.19"
+etagere = "0.3.0"
+lru = { version = "0.16.2", default-features = false }
+rustc-hash = "2.1.1"
+wgpu = { version = "30.0.0", default-features = false, features = ["wgsl"] }

@@ -16,7 +16,9 @@ use objc2_app_kit::NSWindow;
 use objc2::runtime::AnyObject;
 use objc2_core_foundation::{CFData, CFRetained, CGAffineTransform};
 use objc2_core_graphics::{CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGImage, CGImageAlphaInfo, kCGColorSpaceSRGB};
-use objc2_foundation::{NSArray, NSNumber, NSPoint, NSRect, NSSize, NSString, NSValue};
+use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSPoint, NSRect, NSSize, NSString, NSValue};
+use objc2_io_surface::IOSurfaceRef;
+use objc2_metal::{MTLDevice, MTLPixelFormat, MTLStorageMode, MTLTextureDescriptor, MTLTextureType, MTLTextureUsage};
 use objc2_quartz_core::{
     CAAnimation, CAAnimationGroup, CABasicAnimation, CAFrameRateRange, CAKeyframeAnimation, CALayer, CAMediaTiming, CAMediaTimingFunction, CAMetalLayer,
     CATransaction, kCAAnimationDiscrete, kCAFillModeBoth, kCAFilterLinear, kCAMediaTimingFunctionEaseInEaseOut,
@@ -24,6 +26,107 @@ use objc2_quartz_core::{
 use vw_render::{BakedActor, BakedBurst, BurstActor, BurstRenderer, EditBurst, Gpu, SceneStyle, WallpaperRenderer};
 
 const BREATH_KEY: &str = "vw-breath";
+
+/// Format of the scene layer's surfaces ('BGRA' IOSurfaces).
+pub const SCENE_LAYER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
+
+/// The composited scene, shown as the contents of a plain layer at the bottom of the
+/// window: one IOSurface the renderer draws into, replaced on every redraw.
+///
+/// Memory: a wgpu surface (CAMetalLayer) keeps every drawable it has handed out, so
+/// after its second present the window holds two full-screen buffers for good
+/// (~24 MB each on a 3024x1964 display). This layer holds one: a redraw makes a new
+/// surface, draws into it, waits for the GPU, shows it and frees the old one.
+/// Presenting also wakes the Metal driver's render pool just as a render pass does,
+/// so skipping the present costs nothing extra (measured 2026-11-07).
+pub struct SceneLayer {
+    layer: Retained<CALayer>,
+    shown: Option<CFRetained<IOSurfaceRef>>,
+}
+
+/// A surface being drawn for [`SceneLayer::show`].
+pub struct SceneTarget {
+    surface: CFRetained<IOSurfaceRef>,
+    pub texture: wgpu::Texture,
+}
+
+impl SceneLayer {
+    /// Adds the layer under everything else in `window`'s content view.
+    pub fn new(window: &NSWindow) -> Option<Self> {
+        let host = window.contentView()?.layer()?;
+        let layer = CALayer::new();
+        layer.setFrame(host.bounds());
+        layer.setOpaque(true);
+        layer.setContentsScale(window.backingScaleFactor());
+        host.insertSublayer_atIndex(&layer, 0);
+        Some(SceneLayer { layer, shown: None })
+    }
+
+    /// Keeps the layer's frame matched to its host after a resize.
+    pub fn fit(&self, window: &NSWindow) {
+        if let Some(host) = window.contentView().and_then(|v| v.layer()) {
+            without_actions(|| {
+                self.layer.setFrame(host.bounds());
+                self.layer.setContentsScale(window.backingScaleFactor());
+            });
+        }
+    }
+
+    /// A new IOSurface of `size` pixels, wrapped as a wgpu render target.
+    pub fn target(&self, gpu: &Gpu, size: [u32; 2]) -> Option<SceneTarget> {
+        let [w, h] = size.map(|v| v.max(1));
+        let keys = ["IOSurfaceWidth", "IOSurfaceHeight", "IOSurfaceBytesPerElement", "IOSurfacePixelFormat"].map(NSString::from_str);
+        let values = [w, h, 4, u32::from_be_bytes(*b"BGRA")].map(NSNumber::new_u32);
+        let props = NSDictionary::from_retained_objects(&keys.each_ref().map(|k| &**k), &values);
+        // SAFETY: NSDictionary is toll-free bridged with CFDictionary, and the
+        // properties are the documented CFString keys with CFNumber values.
+        let surface = unsafe { IOSurfaceRef::new(&*(Retained::as_ptr(&props) as *const objc2_core_foundation::CFDictionary)) }?;
+        // SAFETY: the device is wgpu's Metal device; the texture is created from it,
+        // matches the descriptor below and is cleared by the first render pass.
+        unsafe {
+            let hal = gpu.device.as_hal::<wgpu::hal::api::Metal>()?;
+            let desc = MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                MTLPixelFormat::BGRA8Unorm,
+                w as usize,
+                h as usize,
+                false,
+            );
+            desc.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+            desc.setStorageMode(MTLStorageMode::Shared);
+            let raw = hal.raw_device().newTextureWithDescriptor_iosurface_plane(&desc, &surface, 0)?;
+            let extent = wgpu::hal::CopyExtent { width: w, height: h, depth: 1 };
+            let hal_texture = wgpu::hal::metal::Device::texture_from_raw(raw, SCENE_LAYER_FORMAT, MTLTextureType::Type2D, 1, 1, extent, None);
+            let texture = gpu.device.create_texture_from_hal::<wgpu::hal::api::Metal>(
+                hal_texture,
+                &wgpu::TextureDescriptor {
+                    label: Some("scene layer"),
+                    size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: SCENE_LAYER_FORMAT,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                },
+                wgpu::TextureUses::UNINITIALIZED,
+            );
+            Some(SceneTarget { surface, texture })
+        }
+    }
+
+    /// Shows `target` once the GPU has finished drawing it, and frees the surface
+    /// shown before.
+    pub fn show(&mut self, gpu: &Gpu, target: SceneTarget) {
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let SceneTarget { surface, texture } = target;
+        drop(texture);
+        // SAFETY: IOSurfaceRef is toll-free bridged with the IOSurface class, which
+        // layer contents accept.
+        let contents: &AnyObject = unsafe { &*(CFRetained::as_ptr(&surface).as_ptr() as *const AnyObject) };
+        without_actions(|| unsafe { self.layer.setContents(Some(contents)) });
+        self.shown = Some(surface);
+    }
+}
 
 pub struct GlowOverlay {
     layer: Retained<CAMetalLayer>,

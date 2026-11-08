@@ -10,6 +10,13 @@
 //!    strength, vignette and grain onto the screen. It is the only work an animated
 //!    frame (glow breathing) does: a few texture reads per pixel.
 //!
+//! The app composites right after each scene redraw and then frees the textures
+//! ([`WallpaperRenderer::release_targets`]); glow breathing runs in Core Animation.
+//!
+//! Memory: every upload goes into a new buffer created mapped ([`Gpu::buffer_with`]),
+//! never through `queue.write_buffer`, so a redraw encodes render passes only and the
+//! Metal driver's separate copy/compute pool (~72 MB) stays asleep.
+//!
 //! Nothing here runs on its own; the app asks for frames.
 
 pub mod burst;
@@ -104,6 +111,8 @@ pub struct Gpu {
     pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    /// Vertex and uniform buffers can be mapped (unified memory): see [`Gpu::buffer_with`].
+    pub mappable: bool,
 }
 
 impl Gpu {
@@ -117,14 +126,47 @@ impl Gpu {
             apply_limit_buckets: false,
         }))
         .ok()?;
+        let mappable = adapter.features().contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("vw"),
+            required_features: if mappable { wgpu::Features::MAPPABLE_PRIMARY_BUFFERS } else { wgpu::Features::empty() },
             // Keep the driver's memory pools small; a wallpaper renders rarely.
             memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
         }))
         .ok()?;
-        Some(Gpu { instance, adapter, device, queue })
+        Some(Gpu { instance, adapter, device, queue, mappable })
+    }
+
+    /// A new buffer holding `bytes`, for `usage` (vertex or uniform).
+    ///
+    /// Memory: on Apple GPUs the driver keeps one ~100 MB working pool for render
+    /// passes and presents and a separate ~72 MB one for copy and compute work, each
+    /// for about a second after the GPU goes idle (measured 2026-11-07, also in a bare
+    /// Metal program). `queue.write_buffer` uploads with a copy, so a redraw that used
+    /// it held both pools. A buffer created mapped and written by the CPU (unified
+    /// memory) needs no copy, so a redraw touches only the render pool.
+    pub fn buffer_with(&self, label: &str, usage: wgpu::BufferUsages, bytes: &[u8]) -> wgpu::Buffer {
+        let size = (bytes.len() as u64).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT).max(wgpu::COPY_BUFFER_ALIGNMENT);
+        if !self.mappable {
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: usage | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.queue.write_buffer(&buffer, 0, bytes);
+            return buffer;
+        }
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size,
+            usage: usage | wgpu::BufferUsages::MAP_WRITE,
+            mapped_at_creation: true,
+        });
+        buffer.slice(..).get_mapped_range_mut().expect("buffer mapped at creation").slice(..bytes.len()).copy_from_slice(bytes);
+        buffer.unmap();
+        buffer
     }
 
     pub fn headless() -> Option<Gpu> {
@@ -177,13 +219,8 @@ fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-fn uniform_buffer<T: Pod>(device: &wgpu::Device, label: &str) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some(label),
-        size: std::mem::size_of::<T>() as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    })
+fn uniform_with<T: Pod>(gpu: &Gpu, label: &str, value: &T) -> wgpu::Buffer {
+    gpu.buffer_with(label, wgpu::BufferUsages::UNIFORM, bytemuck::bytes_of(value))
 }
 
 struct Pipelines {
@@ -296,23 +333,13 @@ struct Targets {
     glow_b: wgpu::Texture,
     blur_h: wgpu::BindGroup,
     blur_v: wgpu::BindGroup,
-    composite: wgpu::BindGroup,
 }
 
+/// Puts `data` in a new vertex buffer in `slot` (see [`Gpu::buffer_with`]); empties
+/// the slot when there is nothing to draw. Returns the instance count.
 fn instance_buffer<T: Pod>(gpu: &Gpu, slot: &mut Option<wgpu::Buffer>, data: &[T], label: &str) -> u32 {
     let bytes: &[u8] = bytemuck::cast_slice(data);
-    if bytes.is_empty() {
-        return 0;
-    }
-    if slot.as_ref().is_none_or(|b| b.size() < bytes.len() as u64) {
-        *slot = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label),
-            size: (bytes.len() as u64).next_power_of_two(),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        }));
-    }
-    gpu.queue.write_buffer(slot.as_ref().unwrap(), 0, bytes);
+    *slot = (!bytes.is_empty()).then(|| gpu.buffer_with(label, wgpu::BufferUsages::VERTEX, bytes));
     data.len() as u32
 }
 
@@ -321,13 +348,6 @@ pub struct WallpaperRenderer {
     pipelines: Pipelines,
     text: TextRenderer,
     sampler: wgpu::Sampler,
-    scene_uniforms: wgpu::Buffer,
-    scene_bind: wgpu::BindGroup,
-    glow_uniforms: wgpu::Buffer,
-    glow_bind: wgpu::BindGroup,
-    blur_h_uniforms: wgpu::Buffer,
-    blur_v_uniforms: wgpu::Buffer,
-    composite_uniforms: wgpu::Buffer,
     targets: Option<Targets>,
     halo_buf: Option<wgpu::Buffer>,
     edge_buf: Option<wgpu::Buffer>,
@@ -345,17 +365,6 @@ impl WallpaperRenderer {
     pub fn new(gpu: &Gpu, out_format: wgpu::TextureFormat) -> Self {
         let device = &gpu.device;
         let pipelines = Pipelines::new(device, out_format);
-        let scene_uniforms = uniform_buffer::<Uniforms>(device, "scene uniforms");
-        let glow_uniforms = uniform_buffer::<Uniforms>(device, "glow uniforms");
-        let bind = |buf: &wgpu::Buffer| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &pipelines.scene_layout,
-                entries: &[wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() }],
-            })
-        };
-        let scene_bind = bind(&scene_uniforms);
-        let glow_bind = bind(&glow_uniforms);
         WallpaperRenderer {
             text: TextRenderer::new(gpu, SCENE_FORMAT),
             sampler: device.create_sampler(&wgpu::SamplerDescriptor {
@@ -365,13 +374,6 @@ impl WallpaperRenderer {
                 address_mode_v: wgpu::AddressMode::ClampToEdge,
                 ..Default::default()
             }),
-            scene_uniforms,
-            scene_bind,
-            glow_uniforms,
-            glow_bind,
-            blur_h_uniforms: uniform_buffer::<BlurUniforms>(device, "blur h"),
-            blur_v_uniforms: uniform_buffer::<BlurUniforms>(device, "blur v"),
-            composite_uniforms: uniform_buffer::<CompositeUniforms>(device, "composite"),
             pipelines,
             targets: None,
             halo_buf: None,
@@ -408,7 +410,9 @@ impl WallpaperRenderer {
         let glow_a = tex("glow a", gw, gh, GLOW_FORMAT);
         let glow_b = tex("glow b", gw, gh, GLOW_FORMAT);
         let view = |t: &wgpu::Texture| t.create_view(&Default::default());
-        let blur_bind = |src: &wgpu::Texture, uniforms: &wgpu::Buffer| {
+        let texel = [1.0 / gw as f32, 1.0 / gh as f32];
+        let blur_bind = |src: &wgpu::Texture, dir: [f32; 2]| {
+            let uniforms = uniform_with(gpu, "blur", &BlurUniforms { dir, _pad: [0.0; 2] });
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &self.pipelines.blur_layout,
@@ -419,22 +423,9 @@ impl WallpaperRenderer {
                 ],
             })
         };
-        let blur_h = blur_bind(&glow_a, &self.blur_h_uniforms);
-        let blur_v = blur_bind(&glow_b, &self.blur_v_uniforms);
-        let composite = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &self.pipelines.composite_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view(&scene)) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view(&glow_a)) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                wgpu::BindGroupEntry { binding: 3, resource: self.composite_uniforms.as_entire_binding() },
-            ],
-        });
-        let texel = [1.0 / gw as f32, 1.0 / gh as f32];
-        gpu.queue.write_buffer(&self.blur_h_uniforms, 0, bytemuck::bytes_of(&BlurUniforms { dir: [texel[0], 0.0], _pad: [0.0; 2] }));
-        gpu.queue.write_buffer(&self.blur_v_uniforms, 0, bytemuck::bytes_of(&BlurUniforms { dir: [0.0, texel[1]], _pad: [0.0; 2] }));
-        self.targets = Some(Targets { size, scene, glow_a, glow_b, blur_h, blur_v, composite });
+        let blur_h = blur_bind(&glow_a, [texel[0], 0.0]);
+        let blur_v = blur_bind(&glow_b, [0.0, texel[1]]);
+        self.targets = Some(Targets { size, scene, glow_a, glow_b, blur_h, blur_v });
     }
 
     /// Redraws the cached layers: call when the graph, positions, look, config or
@@ -460,9 +451,16 @@ impl WallpaperRenderer {
             background: [style.background[0], style.background[1], style.background[2], 1.0],
             background_glow: style.background_glow,
         };
-        gpu.queue.write_buffer(&self.scene_uniforms, 0, bytemuck::bytes_of(&u));
+        let bind = |u: &Uniforms, label: &str| {
+            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &self.pipelines.scene_layout,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform_with(gpu, label, u).as_entire_binding() }],
+            })
+        };
+        let scene_bind = bind(&u, "scene uniforms");
         u.scale = scale / GLOW_DOWNSCALE as f32;
-        gpu.queue.write_buffer(&self.glow_uniforms, 0, bytemuck::bytes_of(&u));
+        let glow_bind = bind(&u, "glow uniforms");
 
         let t = self.targets.as_ref().unwrap();
         let p = &self.pipelines;
@@ -470,7 +468,7 @@ impl WallpaperRenderer {
         {
             let view = t.scene.create_view(&Default::default());
             let mut pass = begin(&mut enc, &view, "scene");
-            pass.set_bind_group(0, &self.scene_bind, &[]);
+            pass.set_bind_group(0, &scene_bind, &[]);
             pass.set_pipeline(&p.bg);
             pass.draw(0..3, 0..1);
             draw_instances(&mut pass, &p.halos, &self.halo_buf, halos);
@@ -486,7 +484,7 @@ impl WallpaperRenderer {
             let glow_b = t.glow_b.create_view(&Default::default());
             {
                 let mut pass = begin(&mut enc, &glow_a, "glow");
-                pass.set_bind_group(0, &self.glow_bind, &[]);
+                pass.set_bind_group(0, &glow_bind, &[]);
                 draw_instances(&mut pass, &p.curtains, &self.curtain_buf, curtains);
                 draw_instances(&mut pass, &p.glow, &self.glow_buf, glows);
             }
@@ -521,6 +519,17 @@ impl WallpaperRenderer {
         self.post(gpu, view, style, glow, &self.pipelines.glow_overlay);
     }
 
+    /// Frees the cached scene and glow textures. The next draw must call
+    /// [`Self::set_scene`] first ([`Self::has_targets`] tells).
+    pub fn release_targets(&mut self) {
+        self.targets = None;
+    }
+
+    /// Whether the cached textures exist (see [`Self::release_targets`]).
+    pub fn has_targets(&self) -> bool {
+        self.targets.is_some()
+    }
+
     /// True when the last scene has a glow layer worth showing.
     pub fn has_glow(&self) -> bool {
         self.has_glow
@@ -542,12 +551,22 @@ impl WallpaperRenderer {
             size: [t.size[0] as f32, t.size[1] as f32],
             glow_texel: [1.0 / glow_px[0], 1.0 / glow_px[1]],
         };
-        gpu.queue.write_buffer(&self.composite_uniforms, 0, bytemuck::bytes_of(&u));
+        let view_of = |t: &wgpu::Texture| t.create_view(&Default::default());
+        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.pipelines.composite_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view_of(&t.scene)) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view_of(&t.glow_a)) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: uniform_with(gpu, "composite", &u).as_entire_binding() },
+            ],
+        });
         let mut enc = gpu.device.create_command_encoder(&Default::default());
         {
             let mut pass = begin(&mut enc, view, "composite");
             pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &t.composite, &[]);
+            pass.set_bind_group(0, &bind, &[]);
             pass.draw(0..3, 0..1);
         }
         gpu.queue.submit([enc.finish()]);

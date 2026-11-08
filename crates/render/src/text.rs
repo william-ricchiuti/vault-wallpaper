@@ -474,12 +474,7 @@ impl QuadLayer {
             multiview_mask: None,
             cache: None,
         });
-        let params = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("text quad params"),
-            size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let params = gpu.buffer_with("text quad params", wgpu::BufferUsages::UNIFORM, &[0; 16]);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("text glow"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -494,8 +489,10 @@ impl QuadLayer {
     /// Packs the sprites into the glow texture, fills in their quads' rects and
     /// UVs, and uploads the instances. `sprites` pairs a quad index with its sprite.
     fn upload(&mut self, gpu: &Gpu, size: [u32; 2], quads: &mut Vec<Quad>, sprites: &[(usize, Sprite)]) {
+        // New buffers rather than queue writes, so a redraw needs no GPU copy (see
+        // `Gpu::buffer_with`).
         let params: [f32; 4] = [size[0].max(1) as f32, size[1].max(1) as f32, 0.0, 0.0];
-        gpu.queue.write_buffer(&self.params, 0, bytemuck::cast_slice(&params));
+        self.params = gpu.buffer_with("text quad params", wgpu::BufferUsages::UNIFORM, bytemuck::cast_slice(&params));
 
         // Shelf packing with a one-texel empty border around every sprite, so
         // bilinear sampling never picks up a neighbour.
@@ -527,8 +524,8 @@ impl QuadLayer {
         let current = u64::from(cur[0]) * u64::from(cur[1]);
         if atlas_w > cur[0] || atlas_h > cur[1] || current > 4 * needed.max(256 * 16) {
             self.glow = glow_texture(gpu, [atlas_w, atlas_h]);
-            self.bind_group = bind(gpu, &self.layout, &self.params, &self.glow, &self.sampler);
         }
+        self.bind_group = bind(gpu, &self.layout, &self.params, &self.glow, &self.sampler);
         let (tw, th) = (self.glow.width() as f32, self.glow.height() as f32);
         if !sprites.is_empty() {
             let mut image = vec![0u8; (atlas_w * atlas_h) as usize];
@@ -563,18 +560,7 @@ impl QuadLayer {
 
         self.count = quads.len() as u32;
         let bytes: &[u8] = bytemuck::cast_slice(quads);
-        if bytes.is_empty() {
-            return;
-        }
-        if self.instances.as_ref().is_none_or(|b| b.size() < bytes.len() as u64) {
-            self.instances = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("text quads"),
-                size: (bytes.len() as u64).next_power_of_two(),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-        }
-        gpu.queue.write_buffer(self.instances.as_ref().unwrap(), 0, bytes);
+        self.instances = (!bytes.is_empty()).then(|| gpu.buffer_with("text quads", wgpu::BufferUsages::VERTEX, bytes));
     }
 
     fn render(&self, pass: &mut wgpu::RenderPass<'_>) {

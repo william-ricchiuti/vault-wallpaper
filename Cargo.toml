@@ -1,3 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/app", "crates/core", "crates/render", "spike"]
+
+# glyphon with glyph vertices uploaded without a GPU copy: vendor/glyphon/PATCHES.md.
+[patch.crates-io]
+glyphon = { path = "vendor/glyphon" }
