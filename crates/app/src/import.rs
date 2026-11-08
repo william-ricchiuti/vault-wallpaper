@@ -56,7 +56,22 @@ pub fn run(config_path: &Path, current: &Config) -> bool {
         );
         return false;
     }
-    let presets = import_presets(&file, config_path);
+    let mut presets = import_presets(&file, config_path);
+    if presets.is_none()
+        && let Some(old) = blocked_presets(&file)
+    {
+        // In the App Sandbox only the picked file can be read, not the presets next to
+        // it: one more pick grants that file too.
+        let mut dialog = FileDialog::new()
+            .set_title("Also import your custom presets: select custom-presets.json and click Open")
+            .add_filter("JSON", &["json"]);
+        if let Some(dir) = old.parent() {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(picked) = dialog.pick_file() {
+            presets = import_presets_file(&picked, config_path);
+        }
+    }
     let mut notes = Vec::new();
     if let Some(n) = presets.filter(|n| *n > 0) {
         notes.push(format!("{n} custom preset(s) added."));
@@ -92,12 +107,23 @@ pub fn merge(mut imported: Config, current: &Config) -> Config {
 /// Adds the old `custom-presets.json` (if any) to ours; a preset whose name we already
 /// have keeps our version. Returns how many were added, `None` if there was nothing to read.
 fn import_presets(old_config: &Path, config_path: &Path) -> Option<usize> {
+    import_presets_file(&old_config.parent()?.join("custom-presets.json"), config_path)
+}
+
+/// The web version's `custom-presets.json` next to `old_config`, if it is there but can't
+/// be read (the sandbox allows looking at it, not reading it).
+fn blocked_presets(old_config: &Path) -> Option<PathBuf> {
     let old = old_config.parent()?.join("custom-presets.json");
+    let denied = old.is_file() && fs::File::open(&old).is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied);
+    denied.then_some(old)
+}
+
+fn import_presets_file(old: &Path, config_path: &Path) -> Option<usize> {
     let ours = presets_path(config_path);
     if old == ours {
         return None;
     }
-    let incoming = read_array(&old)?;
+    let incoming = read_array(old)?;
     let mut list = read_array(&ours).unwrap_or_default();
     let added = merge_presets(&mut list, incoming);
     if added > 0 {
@@ -233,6 +259,9 @@ mod tests {
             import_presets(&old.join("config.json"), &new.join("config.json")),
             Some(1)
         );
+        // Readable (not sandboxed) or missing: nothing to ask for.
+        assert_eq!(blocked_presets(&old.join("config.json")), None);
+        assert_eq!(blocked_presets(&dir.join("nowhere/config.json")), None);
         let back = config::load(&new.join("config.json")).unwrap().config;
         assert_eq!(back.vault_path.as_deref(), Some("/notes"));
         assert_eq!(back.theme, "wash");

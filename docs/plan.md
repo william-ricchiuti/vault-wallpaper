@@ -513,6 +513,8 @@ credentials (notarization, making the repo public, releases) still waits for him
    `com.williamricchiuti.vaultwallpaper`. No "Obsidian" in the app name.
 6. **Distribution.** ✅ Default taken 2026-11-06: signed and notarized DMG on GitHub Releases plus a
    Homebrew cask in William's own tap. Mac App Store later, if ever.
+   Updated 2026-11-08: the app is free on all three: the DMG with Sparkle, Homebrew, and the
+   Mac App Store (sandboxed, no updater; see `packaging/appstore/README.md`).
 7. **The npm package.** ✅ Decided 2026-11-05: it stays with the web version, which is still maintained.
 
 ## Rough total

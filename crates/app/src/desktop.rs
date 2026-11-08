@@ -65,14 +65,22 @@ pub mod login {
     }
 }
 
-/// Shows a file in Finder.
+/// Shows a file in Finder. Through NSWorkspace rather than `open -R`, which also works
+/// in the App Sandbox without spawning a process.
 pub fn reveal(path: &std::path::Path) {
-    let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    if let Some(url) = objc2_foundation::NSURL::from_file_path(path) {
+        let urls = objc2_foundation::NSArray::from_retained_slice(&[url]);
+        objc2_app_kit::NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&urls);
+    }
 }
 
 /// Opens a file with its default app.
 pub fn open(path: &std::path::Path) {
-    let _ = std::process::Command::new("open").arg(path).spawn();
+    if let Some(url) = objc2_foundation::NSURL::from_file_path(path)
+        && !objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url)
+    {
+        eprintln!("could not open {}", path.display());
+    }
 }
 
 /// Brings this (Dock-less) app to the front, so a window it opens gets focus.

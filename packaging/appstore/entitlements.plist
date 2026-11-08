@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  App Sandbox entitlements for the Mac App Store build. Each key is here because a feature
+  needs it; nothing else is granted (no server, no camera, no Apple Events).
+
+  build.sh adds com.apple.application-identifier and com.apple.developer.team-identifier
+  (from VW_TEAM_ID) for a real App Store signature; an ad-hoc test build uses this file as is.
+-->
+<plist version="1.0">
+<dict>
+	<!-- Required for the Mac App Store. -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- Read the vault folder the user picks (Choose Vault…), and the web version's
+	     config.json picked in Import Web Version Settings…. Read-only: the app never
+	     writes into the vault. -->
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
+	<!-- Keep reading the picked vault after a relaunch: a security-scoped bookmark,
+	     saved in the container as vault.bookmark. -->
+	<key>com.apple.security.files.bookmarks.app-scope</key>
+	<true/>
+	<!-- Export PNG writes ~/Pictures/Vault Wallpaper/vault-wallpaper-<time>.png, as the
+	     direct build does, without a save panel. -->
+	<key>com.apple.security.assets.pictures.read-write</key>
+	<true/>
+	<!-- The settings window is a WKWebView. In the sandbox WebKit's own networking
+	     process won't load anything without this, not even the page the app serves
+	     in-process through its vw:// scheme (tested 2026-11-08: the page stays blank
+	     without it). The app connects to nothing; the page has no remote URLs. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+</dict>
+</plist>

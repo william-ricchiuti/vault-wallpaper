@@ -15,6 +15,7 @@
 //! Animation over the still scene, with no app frames; when it ends its layers are
 //! removed. A settled, still wallpaper draws nothing at all.
 
+mod bookmark;
 mod desktop;
 mod displays;
 mod import;
@@ -252,6 +253,9 @@ struct App {
     burst_bytes: usize,
     /// What the Obsidian plugin says is open; inert without the plugin.
     presence: Presence,
+    /// Sandboxed builds only: the vault's security-scoped access, held while it is
+    /// scanned and watched. Last, so it is given back after the watchers stop.
+    vault_access: Option<bookmark::Access>,
 }
 
 impl App {
@@ -285,12 +289,34 @@ impl App {
 
     /// (Re)scans the vault and starts watching it.
     fn open_vault(&mut self) {
+        self.open_vault_or_ask(true);
+    }
+
+    /// [`open_vault`](Self::open_vault). In the sandbox a vault without a working
+    /// bookmark (a hand-edited or imported `vaultPath`, or a moved folder) can't be read;
+    /// with `ask`, the folder picker opens on it so one click grants access again.
+    fn open_vault_or_ask(&mut self, ask: bool) {
         self._vault_watcher = None;
         self.presence = Presence::default();
         let Some(path) = self.vault_path() else {
             eprintln!("no vault set: pass --vault or set vaultPath in {}", self.args.config.display());
+            self.vault_access = None;
             return;
         };
+        if bookmark::sandboxed() {
+            match bookmark::open(&bookmark::file_for(&self.args.config), &path) {
+                Ok(access) => self.vault_access = Some(access),
+                Err(e) => {
+                    eprintln!("vault access: {e}");
+                    self.vault_access = None;
+                    if ask {
+                        let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                        self.choose_vault(Some(&path), &format!("Allow Vault Wallpaper to read “{name}”: select it and click Open"));
+                    }
+                    return;
+                }
+            }
+        }
         let t = Instant::now();
         let vault = Vault::scan(&path, self.cfg.vault_options());
         eprintln!("[{:.0} ms] scanned {} notes in {:.0} ms", self.ms(), vault.len(), t.elapsed().as_secs_f64() * 1000.0);
@@ -312,6 +338,7 @@ impl App {
     /// A graph from the vault watcher: an edit. Notes it saved are remembered, and
     /// their bursts start once the layout frame that shows this graph arrives.
     fn on_graph(&mut self, graph: Graph) {
+        eprintln!("[{:.0} ms] vault changed: {} notes", self.ms(), graph.nodes.len());
         // While the Obsidian plugin is live, its save reports start the bursts instead.
         if self.edit_burst.is_some()
             && !self.presence.live(vw_core::presence::now_ms())
@@ -724,22 +751,7 @@ impl App {
                 self.update_breathing();
                 self.invalidate_scene();
             }
-            Action::ChooseVault => {
-                let picked = rfd::FileDialog::new().set_title("Choose your Obsidian vault").pick_folder();
-                if let Some(dir) = picked {
-                    let mut cfg = self.cfg.clone();
-                    if !self.args.config.exists() {
-                        // A new install starts still (lightness first); motion is opt-in.
-                        cfg.motion_mode = config::MotionMode::Still;
-                    }
-                    cfg.vault_path = Some(dir.to_string_lossy().into_owned());
-                    self.args.vault = None;
-                    // The config watcher picks the change up and rescans.
-                    if let Err(e) = config::save(&self.args.config, &cfg) {
-                        eprintln!("could not save the config: {e}");
-                    }
-                }
-            }
+            Action::ChooseVault => self.choose_vault(None, "Choose your Obsidian vault"),
             Action::ImportWebConfig => {
                 // A menu-bar app isn't frontmost: bring the dialogs forward.
                 desktop::activate();
@@ -796,6 +808,39 @@ impl App {
                 }
             }
             Action::Quit => event_loop.exit(),
+        }
+    }
+
+    /// The folder picker. A picked folder becomes the vault: saved in the config (the
+    /// config watcher then rescans) and, in the sandbox, bookmarked so it can be read
+    /// again after a relaunch.
+    fn choose_vault(&mut self, start: Option<&std::path::Path>, title: &str) {
+        desktop::activate();
+        let mut dialog = rfd::FileDialog::new().set_title(title);
+        if let Some(dir) = start {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(dir) = dialog.pick_folder() else { return };
+        if bookmark::sandboxed()
+            && let Err(e) = bookmark::save(&bookmark::file_for(&self.args.config), &dir)
+        {
+            eprintln!("vault bookmark: {e}");
+        }
+        let same = self.vault_path().as_deref() == Some(dir.as_path());
+        let mut cfg = self.cfg.clone();
+        if !self.args.config.exists() {
+            // A new install starts still (lightness first); motion is opt-in.
+            cfg.motion_mode = config::MotionMode::Still;
+        }
+        cfg.vault_path = Some(dir.to_string_lossy().into_owned());
+        self.args.vault = None;
+        if let Err(e) = config::save(&self.args.config, &cfg) {
+            eprintln!("could not save the config: {e}");
+        }
+        if same {
+            // The config doesn't change, so the watcher won't rescan: the folder was
+            // picked again to grant access.
+            self.open_vault_or_ask(false);
         }
     }
 
@@ -943,8 +988,12 @@ impl App {
         let data = self.theme.build(&sh.layout, &sh.look, &sh.positions, &framing, &self.style, points);
         let rgba = render_rgba(gpu, size, scale, &self.style, &data, 1.0);
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        // In the sandbox HOME is the app's container, whose Pictures is a link to the
+        // real ~/Pictures (allowed by the pictures entitlement); resolve it so Finder
+        // shows the real folder.
         let dir = home.join("Pictures/Vault Wallpaper");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let dir = dir.canonicalize().unwrap_or(dir);
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let path = dir.join(format!("vault-wallpaper-{stamp}.png"));
         write_png(&path, size, &rgba).map_err(|e| e.to_string())?;
@@ -1124,6 +1173,7 @@ fn main() {
         bursts: Vec::new(),
         burst_bytes: 0,
         presence: Presence::default(),
+        vault_access: None,
     };
     app.edit_burst = app.theme.edit_burst(&app.cfg);
     event_loop.run_app(&mut app).expect("run");
