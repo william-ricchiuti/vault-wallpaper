@@ -1,0 +1,26 @@
+# cargo-about configuration for THIRD-PARTY-NOTICES.txt (packaging/notices.sh).
+# Only what ends up in the shipped macOS binary: no dev-dependencies, no build scripts'
+# own dependencies, macOS targets only.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+ignore-dev-dependencies = true
+ignore-build-dependencies = true
+# Licences allowed in the dependency tree, in order of preference: for a crate offered
+# under a choice ("MIT OR Apache-2.0") the first one listed here is the one used. A crate
+# with only some other licence stops generation until it is reviewed and added here.
+accepted = [
+    "MIT",
+    "MIT-0",
+    "Zlib",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "Unlicense",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MPL-2.0",
+    "OFL-1.1",
+]
