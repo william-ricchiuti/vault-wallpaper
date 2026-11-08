@@ -1,0 +1,190 @@
+# Release the direct build when a version tag is pushed: build universal, sign, notarize,
+# staple, make the DMG and the signed Sparkle appcast (packaging/release.sh), publish the
+# GitHub Release, and open a cask bump PR in william-ricchiuti/homebrew-tap.
+#
+# Trigger: `git push origin v1.0.0` (the tag must match crates/app/Cargo.toml).
+# Secrets: listed and explained in docs/release-checklist.md ("GitHub Actions secrets").
+# Cost: free on a public repo. On a private repo a run (~15-25 min) uses about 150-250 of the
+# 2,000 free monthly minutes, since macOS minutes count 10x.
+# The App Store package isn't built here (different certificates); see packaging/appstore/.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  REPO: william-ricchiuti/vault-wallpaper
+  TAP_REPO: william-ricchiuti/homebrew-tap
+
+defaults:
+  run:
+    # Explicit bash gets -eo pipefail, so a failure before `| tee` still fails the step.
+    shell: bash
+
+jobs:
+  release:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: build-app.sh uses the commit count as CFBundleVersion.
+          fetch-depth: 0
+
+      - name: Version from the tag
+        id: version
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          TOML_V="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' crates/app/Cargo.toml | head -n 1)"
+          if [[ "$V" != "$TOML_V" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME doesn't match crates/app/Cargo.toml version $TOML_V"
+            exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if [[ "$V" == *-* ]]; then echo "prerelease=true" >> "$GITHUB_OUTPUT"; else echo "prerelease=false" >> "$GITHUB_OUTPUT"; fi
+
+      # Publishing from William's Mac (packaging/release.sh + gh release create) also pushes
+      # the tag. If that release already has the DMG, stop here instead of rebuilding.
+      - name: Already published?
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.version.outputs.version }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$REPO" --json assets --jq '.assets[].name' 2>/dev/null \
+               | grep -qx "Vault-Wallpaper-$V.dmg"; then
+            echo "::notice::release $GITHUB_REF_NAME already has its DMG; nothing to do"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.existing.outputs.published != 'true'
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.existing.outputs.published != 'true'
+
+      - name: Import the Developer ID certificate
+        if: steps.existing.outputs.published != 'true'
+        id: keychain
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          if [[ -z "$MACOS_CERTIFICATE_P12" ]]; then
+            echo "::error::secret MACOS_CERTIFICATE_P12 is not set (docs/release-checklist.md)"
+            exit 1
+          fi
+          KEYCHAIN="$RUNNER_TEMP/release.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # Put the new keychain first in the search list, keeping the existing ones.
+          EXISTING=()
+          while IFS= read -r kc; do EXISTING+=("$kc"); done < <(security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"$//')
+          security list-keychains -d user -s "$KEYCHAIN" "${EXISTING[@]}"
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -n 1)"
+          if [[ -z "$IDENTITY" ]]; then
+            echo "::error::no 'Developer ID Application' identity in MACOS_CERTIFICATE_P12"
+            exit 1
+          fi
+          echo "keychain=$KEYCHAIN" >> "$GITHUB_OUTPUT"
+          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+
+      - name: Write the App Store Connect API key
+        if: steps.existing.outputs.published != 'true'
+        env:
+          APPSTORE_CONNECT_API_KEY_P8: ${{ secrets.APPSTORE_CONNECT_API_KEY_P8 }}
+        run: |
+          if [[ -z "$APPSTORE_CONNECT_API_KEY_P8" ]]; then
+            echo "::error::secret APPSTORE_CONNECT_API_KEY_P8 is not set (docs/release-checklist.md)"
+            exit 1
+          fi
+          printf '%s\n' "$APPSTORE_CONNECT_API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+          chmod 600 "$RUNNER_TEMP/AuthKey.p8"
+
+      - name: Build, sign, notarize, DMG, appcast
+        if: steps.existing.outputs.published != 'true'
+        env:
+          VW_SIGN_IDENTITY: ${{ steps.keychain.outputs.identity }}
+          VW_NOTARY_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+          VW_NOTARY_KEY_ID: ${{ secrets.APPSTORE_CONNECT_API_KEY_ID }}
+          VW_NOTARY_ISSUER: ${{ secrets.APPSTORE_CONNECT_ISSUER_ID }}
+          VW_SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          V: ${{ steps.version.outputs.version }}
+        run: packaging/release.sh "$V" --no-appstore 2>&1 | tee "$RUNNER_TEMP/release.log"
+
+      - name: Create the GitHub Release
+        if: steps.existing.outputs.published != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          FLAGS=()
+          [[ "$PRERELEASE" == "true" ]] && FLAGS+=(--prerelease)
+          if gh release view "$GITHUB_REF_NAME" --repo "$REPO" >/dev/null 2>&1; then
+            # A release without the DMG (e.g. a draft made by hand): add the files to it.
+            gh release upload "$GITHUB_REF_NAME" "dist/Vault-Wallpaper-$V.dmg" dist/appcast.xml \
+              --repo "$REPO" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "dist/Vault-Wallpaper-$V.dmg" dist/appcast.xml \
+              --repo "$REPO" --verify-tag \
+              --title "Vault Wallpaper $V" \
+              --notes-file "dist/release-notes-$V.md" "${FLAGS[@]}"
+          fi
+
+      - name: Open a cask bump PR in the tap
+        if: steps.existing.outputs.published != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          V: ${{ steps.version.outputs.version }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::warning::secret TAP_GITHUB_TOKEN is not set; bump the cask by hand (packaging/homebrew/bump-cask.sh)"
+            exit 0
+          fi
+          TAP="$RUNNER_TEMP/homebrew-tap"
+          gh repo clone "$TAP_REPO" "$TAP" -- --depth 1
+          gh auth setup-git
+          packaging/homebrew/bump-cask.sh "$V" "dist/Vault-Wallpaper-$V.dmg" "$TAP"
+          cd "$TAP"
+          BRANCH="vault-wallpaper-$V"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add Casks/vault-wallpaper.rb
+          git commit -m "vault-wallpaper $V"
+          git push --force origin "$BRANCH"
+          gh pr create --repo "$TAP_REPO" --head "$BRANCH" \
+            --title "vault-wallpaper $V" \
+            --body "Bumps the cask to [v$V](https://github.com/$REPO/releases/tag/v$V). Opened by the vault-wallpaper release workflow." \
+            || echo "::notice::a PR for $BRANCH already exists"
+
+      - name: Remove the keychain and key
+        if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/release.keychain-db" ]]; then
+            security delete-keychain "$RUNNER_TEMP/release.keychain-db" || true
+          fi
+          rm -f "$RUNNER_TEMP/AuthKey.p8"

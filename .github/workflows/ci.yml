@@ -1,0 +1,74 @@
+# Tests and clippy on macOS for pull requests, for both feature sets: the default (App Store)
+# build and the direct build with the Sparkle updater.
+#
+# Cost: free on a public repo. On a private repo, macOS minutes count 10x against the free
+# 2,000 minutes a month (GitHub Free), so about 200 real macOS minutes. One run is roughly
+# 8-15 minutes (less with a warm cache), so about 15-25 PR runs a month. That's why this is
+# one job (one runner start-up and one shared cache), pull requests only, and why a new push
+# cancels the run still going for the same PR.
+name: CI
+
+on:
+  pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "obsidian-plugin/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+defaults:
+  run:
+    # Explicit bash runs with -eo pipefail.
+    shell: bash
+
+jobs:
+  test:
+    name: test + clippy (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Only main writes the cache, so PRs don't evict each other's (10 GB cap per repo).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Does the app have an updater feature?
+        id: features
+        run: |
+          if awk '/^\[features\]/{f=1;next} /^\[/{f=0} f && /^updater[[:space:]]*=/{found=1} END{exit !found}' crates/app/Cargo.toml; then
+            echo "updater=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "updater=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::crates/app has no 'updater' feature yet; testing the default feature set only"
+          fi
+
+      - name: clippy (default features)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: test (default features)
+        run: cargo test --workspace --locked
+
+      - name: clippy (updater)
+        if: steps.features.outputs.updater == 'true'
+        run: cargo clippy --workspace --all-targets --locked --features vault-wallpaper/updater -- -D warnings
+
+      - name: test (updater)
+        if: steps.features.outputs.updater == 'true'
+        run: cargo test --workspace --locked --features vault-wallpaper/updater

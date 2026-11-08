@@ -1,13 +1,12 @@
-# Draft cask for a personal tap (github.com/william-ricchiuti/homebrew-tap, not created yet).
-# Copy to Casks/vault-wallpaper.rb in the tap. Steps in docs/release-checklist.md.
+# Cask for William's tap, github.com/william-ricchiuti/homebrew-tap (Casks/vault-wallpaper.rb).
+# This copy is the template. `packaging/homebrew/bump-cask.sh <version> <dmg> <tap-dir>` writes
+# it into the tap with the release's version and sha256; CI does the same and opens a PR.
 #
-# Before publishing:
-# - `sha256`: run `shasum -a 256 dist/Vault-Wallpaper-<version>.dmg` on the notarized DMG.
-# - The download URL must be public. While the vault-wallpaper repo is private, its release
-#   assets need a GitHub token, so `brew install` fails for everyone else.
+# The download URL must be public: while the vault-wallpaper repo is private, its release
+# assets need a GitHub token and `brew install` fails for everyone else.
 cask "vault-wallpaper" do
   version "1.0.0-beta.1"
-  sha256 "REPLACE_WITH_SHA256_OF_THE_NOTARIZED_DMG"
+  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
 
   url "https://github.com/william-ricchiuti/vault-wallpaper/releases/download/v#{version}/Vault-Wallpaper-#{version}.dmg"
   name "Vault Wallpaper"
@@ -20,18 +19,23 @@ cask "vault-wallpaper" do
     strategy :github_releases
   end
 
-  # The app updates itself with Sparkle; `brew upgrade` leaves it alone unless --greedy.
+  # Sparkle updates the app in place, so `brew upgrade` leaves it alone.
   auto_updates true
-  depends_on macos: ">= :ventura"
+  # Same as ">= :ventura"; current `brew style` wants the bare symbol (Homebrew/OSDependsOn).
+  depends_on macos: :ventura
 
   app "Vault Wallpaper.app"
 
   uninstall quit: "com.williamricchiuti.vaultwallpaper"
 
+  # Settings, layout cache and custom presets; WebKit data from the settings window; Sparkle's
+  # state lives under Caches and Preferences. Exported PNGs in ~/Pictures are the user's.
   zap trash: [
     "~/Library/Application Support/Vault Wallpaper",
     "~/Library/Caches/com.williamricchiuti.vaultwallpaper",
+    "~/Library/HTTPStorages/com.williamricchiuti.vaultwallpaper",
     "~/Library/Preferences/com.williamricchiuti.vaultwallpaper.plist",
+    "~/Library/Saved Application State/com.williamricchiuti.vaultwallpaper.savedState",
     "~/Library/WebKit/com.williamricchiuti.vaultwallpaper",
   ]
 end
