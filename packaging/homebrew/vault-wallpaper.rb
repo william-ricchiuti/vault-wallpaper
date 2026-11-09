@@ -2,8 +2,8 @@
 # This copy is the template. `packaging/homebrew/bump-cask.sh <version> <dmg> <tap-dir>` writes
 # it into the tap with the release's version and sha256; CI does the same and opens a PR.
 #
-# The download URL must be public: while the vault-wallpaper repo is private, its release
-# assets need a GitHub token and `brew install` fails for everyone else.
+# Homebrew 7+ refuses casks from untrusted taps: users run
+# `brew trust --cask william-ricchiuti/tap/vault-wallpaper` before installing (README).
 cask "vault-wallpaper" do
   version "1.0.0-beta.1"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"

@@ -20,11 +20,15 @@ the menu bar: no browser, no Node, no local server, no wallpaper host app.
 
 ### With Homebrew
 
-Coming soon:
+Homebrew 7 and later only load casks from other people's taps once you trust them, so the
+first command does that for this one cask:
 
 ```bash
+brew trust --cask william-ricchiuti/tap/vault-wallpaper
 brew install --cask william-ricchiuti/tap/vault-wallpaper
 ```
+
+Updates come from the app itself (Check for Updates…), so `brew upgrade` leaves it alone.
 
 ## First run
 

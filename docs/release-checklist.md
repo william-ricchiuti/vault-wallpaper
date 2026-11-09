@@ -291,7 +291,7 @@ Then:
   the Dock, and with no config it asks for a vault. Settings… opens, and Export PNG writes
   `~/Pictures/Vault Wallpaper/`. Start at Login shows up in System Settings > General > Login
   Items.
-- **Homebrew:** `brew update && brew install --cask william-ricchiuti/tap/vault-wallpaper`,
+- **Homebrew:** `brew update && brew trust --cask william-ricchiuti/tap/vault-wallpaper && brew install --cask william-ricchiuti/tap/vault-wallpaper`,
   and `brew audit --cask --online william-ricchiuti/tap/vault-wallpaper`.
 - **Sparkle:** with the previous version installed, choose Check for Updates… It should offer
   this version, install it and relaunch.
