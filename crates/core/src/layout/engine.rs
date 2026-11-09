@@ -45,21 +45,19 @@ const MAX_TICKS: u64 = 600;
 impl LayoutEngine {
     /// Starts the layout thread. `publish_every` limits how often moving frames are
     /// sent (the settled frame is always sent). `cache` is where positions are saved.
+    /// Fails only if the OS won't start a thread.
     pub fn spawn(
         opts: LayoutOptions,
         cache: Option<PathBuf>,
         publish_every: Duration,
         on_frame: impl Fn(LayoutFrame) + Send + 'static,
-    ) -> Self {
+    ) -> std::io::Result<Self> {
         let (tx, rx) = mpsc::channel();
-        let thread = thread::Builder::new()
-            .name("vw-layout".into())
-            .spawn(move || {
-                lower_priority();
-                Worker::new(opts, cache, publish_every, Box::new(on_frame)).run(rx);
-            })
-            .expect("spawn layout thread");
-        LayoutEngine { tx, _thread: thread }
+        let thread = thread::Builder::new().name("vw-layout".into()).spawn(move || {
+            lower_priority();
+            Worker::new(opts, cache, publish_every, Box::new(on_frame)).run(rx);
+        })?;
+        Ok(LayoutEngine { tx, _thread: thread })
     }
 
     pub fn set_graph(&self, graph: Graph) {

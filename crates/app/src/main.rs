@@ -428,14 +428,16 @@ impl App {
             Err(e) => eprintln!("not watching the config: {e}"),
         }
         let proxy = self.proxy.clone();
-        self.engine = Some(LayoutEngine::spawn(
+        let engine = LayoutEngine::spawn(
             self.cfg.layout_options(),
             Some(self.args.cache.clone()),
             Duration::from_secs_f64(1.0 / LAYOUT_FPS),
             move |f| {
                 let _ = proxy.send_event(AppEvent::Layout(Box::new(f)));
             },
-        ));
+        )
+        .unwrap_or_else(|e| desktop::fatal("Vault Wallpaper couldn't start.", &format!("could not start the layout thread: {e}")));
+        self.engine = Some(engine);
         self.open_vault();
     }
 
@@ -463,11 +465,12 @@ impl App {
                 Err(e) => {
                     eprintln!("vault access: {e}");
                     self.vault_access = None;
-                    if ask {
-                        let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
-                        self.choose_vault(Some(&path), &format!("Allow Vault Wallpaper to read “{name}”: select it and click Open"));
-                    } else {
-                        // Not from a background reload: the user picks it from the menu.
+                    let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                    // Not from a background reload: the user picks it from the menu.
+                    // A cancelled panel leaves the same state, so the menu says why the
+                    // wallpaper is empty and Choose Vault… fixes it. A pick reopens the
+                    // vault, and the successful open clears the status.
+                    if !ask || !self.choose_vault(Some(&path), &format!("Allow Vault Wallpaper to read “{name}”: select it and click Open")) {
                         self.vault_problem(&path, VaultProblem::NoAccess);
                     }
                     return;
@@ -985,7 +988,9 @@ impl App {
                 self.update_breathing();
                 self.invalidate_scene();
             }
-            Action::ChooseVault => self.choose_vault(None, "Choose your Obsidian vault"),
+            Action::ChooseVault => {
+                self.choose_vault(None, "Choose your Obsidian vault");
+            }
             Action::ImportWebConfig => {
                 // A menu-bar app isn't frontmost: bring the dialogs forward.
                 desktop::activate();
@@ -1047,14 +1052,14 @@ impl App {
 
     /// The folder picker. A picked folder becomes the vault: saved in the config (the
     /// config watcher then rescans) and, in the sandbox, bookmarked so it can be read
-    /// again after a relaunch.
-    fn choose_vault(&mut self, start: Option<&std::path::Path>, title: &str) {
+    /// again after a relaunch. Returns whether a folder was picked.
+    fn choose_vault(&mut self, start: Option<&std::path::Path>, title: &str) -> bool {
         desktop::activate();
         let mut dialog = rfd::FileDialog::new().set_title(title);
         if let Some(dir) = start {
             dialog = dialog.set_directory(dir);
         }
-        let Some(dir) = dialog.pick_folder() else { return };
+        let Some(dir) = dialog.pick_folder() else { return false };
         if bookmark::sandboxed()
             && let Err(e) = bookmark::save(&bookmark::file_for(&self.args.config), &dir)
         {
@@ -1076,6 +1081,7 @@ impl App {
             // picked again to grant access.
             self.open_vault_or_ask(false);
         }
+        true
     }
 
     /// Removes finished bursts' layers. Core Animation plays the bursts; the app
