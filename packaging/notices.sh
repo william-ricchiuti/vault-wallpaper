@@ -9,7 +9,8 @@
 # Usage: packaging/notices.sh [--check]
 #   --check  regenerate into a temporary file and fail (exit 1) if it differs from the
 #            committed one
-# Needs: cargo-about (cargo install --locked cargo-about), and the Sparkle download
+# Needs: cargo-about (cargo install --locked cargo-about --version 0.9.3 --features cli, the
+# version CI pins), and the Sparkle download
 # (packaging/fetch-sparkle.sh, called here).
 set -euo pipefail
 
@@ -24,7 +25,7 @@ case "${1:-}" in
 esac
 
 if ! command -v cargo-about >/dev/null; then
-  echo "error: cargo-about isn't installed: cargo install --locked cargo-about" >&2
+  echo "error: cargo-about isn't installed: cargo install --locked cargo-about --version 0.9.3 --features cli" >&2
   exit 2
 fi
 

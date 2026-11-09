@@ -58,6 +58,7 @@ APP_VERSION="$(read_key VWVersion)"
 BUILD="$(read_key CFBundleVersion)"
 SHORT="$(read_key CFBundleShortVersionString)"
 MIN_OS="$(read_key LSMinimumSystemVersion)"
+APP_PUBKEY="$(read_key SUPublicEDKey)"
 hdiutil detach "$MNT" >/dev/null
 rmdir "$MNT"
 MNT=""
@@ -96,6 +97,38 @@ XML
   exit 0
 fi
 
+# generate_appcast signs only when the private key matches the app's SUPublicEDKey. On a
+# mismatch (or a placeholder key) it writes the item WITHOUT sparkle:edSignature, prints
+# nothing and exits 0 (tested 2026-11-08, docs/sparkle-e2e.md, "CI signing path"). Catch that
+# here with a reason, instead of only noticing the missing signature afterwards.
+if [[ -z "$APP_PUBKEY" || "$APP_PUBKEY" == REPLACE_WITH_* ]]; then
+  echo "error: the app in $DMG has no real SUPublicEDKey (${APP_PUBKEY:-none}); generate_appcast would leave the item unsigned" >&2
+  exit 1
+fi
+# The public key of a base64 Ed25519 seed (Sparkle's private-key format), or nothing if it
+# can't be worked out (no openssl, or not a 32-byte seed). The key only goes through pipes.
+ed25519_public() {
+  local seed_len
+  command -v openssl >/dev/null && command -v xxd >/dev/null || return 0
+  seed_len="$(printf '%s' "$1" | tr -d ' \n\r\t' | base64 -d 2>/dev/null | wc -c | tr -d ' ')"
+  [[ "$seed_len" == 32 ]] || return 0
+  { printf '302e020100300506032b657004220420' | xxd -r -p
+    printf '%s' "$1" | tr -d ' \n\r\t' | base64 -d; } |
+    openssl pkey -inform DER -pubout -outform DER 2>/dev/null | tail -c 32 | base64
+}
+KEY_PUB=""
+if [[ -n "${VW_SPARKLE_PRIVATE_KEY:-}" ]]; then
+  KEY_PUB="$(ed25519_public "$VW_SPARKLE_PRIVATE_KEY")"
+elif [[ -n "${VW_SPARKLE_KEY_FILE:-}" ]]; then
+  [[ -f "$VW_SPARKLE_KEY_FILE" ]] || { echo "error: VW_SPARKLE_KEY_FILE=$VW_SPARKLE_KEY_FILE doesn't exist" >&2; exit 1; }
+  KEY_PUB="$(ed25519_public "$(cat "$VW_SPARKLE_KEY_FILE")")"
+fi
+if [[ -n "$KEY_PUB" && "$KEY_PUB" != "$APP_PUBKEY" ]]; then
+  echo "error: the Sparkle private key doesn't match the app's SUPublicEDKey" >&2
+  echo "       app ${APP_PUBKEY:0:8}..., key's public half ${KEY_PUB:0:8}...; generate_appcast would leave the item unsigned" >&2
+  exit 1
+fi
+
 SPARKLE_DIR="$("$ROOT/packaging/fetch-sparkle.sh" | tail -n 1)"
 
 # generate_appcast works on a folder and signs every archive in it: use a scratch folder
@@ -115,7 +148,7 @@ else
 fi
 
 if ! grep -q 'sparkle:edSignature=' "$WORK/appcast.xml"; then
-  echo "error: appcast.xml has no EdDSA signature" >&2
+  echo "error: appcast.xml has no EdDSA signature (generate_appcast skips signing when the key doesn't match the app's SUPublicEDKey)" >&2
   exit 1
 fi
 cp "$WORK/appcast.xml" "$OUT_FILE"

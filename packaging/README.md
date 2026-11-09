@@ -26,8 +26,10 @@ The app is notarized and stapled before it goes into the DMG, so the copy users 
 (dragged out of the DMG, installed by Homebrew, or swapped in by Sparkle) carries its own
 ticket and opens offline without a Gatekeeper network check.
 
-For a local, unsigned test build, steps 1 and 3 are enough. Gatekeeper will block an
-unsigned DMG downloaded from the web, so publish only after steps 2 and 4.
+For a local, unsigned test build, steps 1 and 4 are enough. Gatekeeper will block an
+unsigned DMG downloaded from the web, so publish only after steps 2, 3 and 5 (signing and
+notarizing). `release.sh` runs the same steps in this order: its steps 2 (build), 3 (sign),
+3b (notarize the app), 4 (DMG), 5 (notarize the DMG) and 6 (appcast).
 
 ## 1. `build-app.sh`
 
@@ -80,9 +82,9 @@ external licences. `build-app.sh` and `appstore/build.sh` copy it to `Contents/R
 `make-dmg.sh` to the DMG root. Regenerate it after any `Cargo.lock` or Sparkle change:
 
 ```bash
-cargo install --locked cargo-about    # once
+cargo install --locked cargo-about --version 0.9.3 --features cli   # once (the version CI pins)
 packaging/notices.sh                  # rewrite it; commit the result
-packaging/notices.sh --check          # exit 1 if it is stale (release.sh runs this)
+packaging/notices.sh --check          # exit 1 if it is stale (release.sh and both workflows run this)
 ```
 
 A dependency under a licence not listed in `notices/about.toml`'s `accepted` stops the
@@ -161,9 +163,14 @@ The output goes to `--out`, by default `dist/appcast/appcast.xml`. If a file is 
 the new item goes on top. `release.sh` never relies on a leftover file: a real run deletes it,
 then starts from the published feed (downloaded from the `appcast` release with `gh`, or with
 `curl` from the feed URL; `VW_PREVIOUS_APPCAST=<file>` to give it by hand), or from nothing when
-that release doesn't exist yet. It then fails if any `<item>` lacks `sparkle:edSignature`. The path is the last line on stdout. The private key is taken from
+that release doesn't exist yet. A new feed would drop every older version's item, so it is
+only started when `gh` (logged in, able to see the repo) says there is no `appcast` release,
+or with `VW_PREVIOUS_APPCAST=none`. Without `gh`, a 404 from the feed URL stops the run: while
+the repo is private it can mean "no access" as well as "no feed yet". It then fails if any `<item>` lacks `sparkle:edSignature`. The path is the last line on stdout. The private key is taken from
 `VW_SPARKLE_PRIVATE_KEY` (the base64 key, for CI), else `VW_SPARKLE_KEY_FILE`, else the
-login Keychain. `--unsigned` writes the item without a signature, for dry runs; Sparkle
+login Keychain. `generate_appcast` silently leaves the item unsigned when that key doesn't
+match the app's `SUPublicEDKey`, so `make-appcast.sh` checks the pair first (for the env and
+file keys) and stops with the reason (`docs/sparkle-e2e.md`, "CI signing path"). `--unsigned` writes the item without a signature, for dry runs; Sparkle
 rejects such a feed. Upload `appcast.xml` to the `appcast` release, after the DMG it points to is published.
 
 Sparkle compares `CFBundleVersion` (the build number), so every release needs a higher one.
@@ -236,12 +243,14 @@ In order, it:
    `REPLACE_WITH_…` placeholder, that no `VW_SPARKLE_*` test override is set and that
    `CHANGELOG.md` has a `## [<version>]` section; then the tools, a clean tree,
    `VW_SIGN_IDENTITY`, notary credentials, `make-appcast.sh`, the build number
-   (`build-number.sh`) and, if cargo-about is installed, `notices.sh --check`
+   (`build-number.sh`) and `notices.sh --check` (a real run stops if cargo-about isn't
+   installed; a dry run only warns)
 2. sets `version` in `crates/app/Cargo.toml` and updates `Cargo.lock`
 3. runs `build-app.sh` with `VW_FEATURES=updater` (the direct build has Sparkle; the App Store
    build doesn't)
 4. runs `sign.sh`, `notarize.sh <app>` (staples the app), `make-dmg.sh`, `notarize.sh <dmg>`
-5. starts `dist/appcast.xml` from the published feed (or empty, for the first release), runs
+5. starts `dist/appcast.xml` from the published feed (or empty, for the first release; it
+   stops rather than guess when the feed can't be fetched), runs
    `make-appcast.sh` and checks that every `<item>` has an `sparkle:edSignature`
 6. runs `appstore/build.sh` if it exists (its exit code 2, "not set up", counts as skipped)
 7. writes the release notes from `CHANGELOG.md`, prints the version and `CFBundleVersion`,

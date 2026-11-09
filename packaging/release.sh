@@ -20,7 +20,9 @@
 #   VW_NOTARY_PROFILE, or VW_NOTARY_KEY_PATH + VW_NOTARY_KEY_ID + VW_NOTARY_ISSUER
 #   a Sparkle key for make-appcast.sh: VW_SPARKLE_PRIVATE_KEY, VW_SPARKLE_KEY_FILE, or the
 #   login Keychain (where sparkle-keys.sh puts it)
-#   VW_PREVIOUS_APPCAST (optional): the current feed, if it can't be downloaded
+#   VW_PREVIOUS_APPCAST (optional): the current feed, if it can't be downloaded; or "none"
+#   to start a new feed on purpose (first release only). Without it the feed history comes
+#   from gh (logged in, able to see the repo) or a 200 from the feed URL; anything else stops.
 #
 # It uploads nothing. At the end it prints the git and `gh release` commands to run.
 set -euo pipefail
@@ -32,7 +34,7 @@ DIST="$ROOT/dist"
 REPO="william-ricchiuti/vault-wallpaper"
 APP_TOML="crates/app/Cargo.toml"
 
-usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; }
 
 VERSION=""
 DRY_RUN=0
@@ -144,7 +146,10 @@ if ((!BUMP_ONLY)); then
     # Dry run: build anyway, from whatever commit this is.
     export VW_BUILD_FROM_ANY_COMMIT=1
   fi
-  # Licence notices shipped in the app and the DMG (packaging/notices.sh).
+  # Licence notices shipped in the app and the DMG (packaging/notices.sh). The version CI
+  # installs (.github/workflows/*.yml, CARGO_ABOUT_VERSION); other versions may word the
+  # output differently and fail the check.
+  CARGO_ABOUT_VERSION=0.9.3
   if command -v cargo-about >/dev/null; then
     if "$PKG/notices.sh" --check; then
       echo "    THIRD-PARTY-NOTICES.txt is up to date"
@@ -152,8 +157,8 @@ if ((!BUMP_ONLY)); then
       check_fail "THIRD-PARTY-NOTICES.txt is out of date; run packaging/notices.sh and commit it"
     fi
   else
-    echo "    warning: cargo-about isn't installed, so THIRD-PARTY-NOTICES.txt wasn't checked"
-    echo "             (cargo install --locked cargo-about, then packaging/notices.sh --check)"
+    # A real release must not ship notices that no longer match Cargo.lock.
+    check_fail "cargo-about isn't installed, so THIRD-PARTY-NOTICES.txt can't be checked (cargo install --locked cargo-about --version $CARGO_ABOUT_VERSION --features cli)"
   fi
 fi
 
@@ -295,35 +300,45 @@ XML
 # update history) or, for the very first release, from nothing.
 rm -f "$APPCAST"
 fetch_previous_appcast() {
-  local tmp code
+  local tmp code why
+  if [[ "${VW_PREVIOUS_APPCAST:-}" == none ]]; then
+    echo "    VW_PREVIOUS_APPCAST=none: starting a new feed (only right for the very first release)"
+    return
+  fi
   if [[ -n "${VW_PREVIOUS_APPCAST:-}" ]]; then
     [[ -f "$VW_PREVIOUS_APPCAST" ]] || die "VW_PREVIOUS_APPCAST=$VW_PREVIOUS_APPCAST doesn't exist"
     cp "$VW_PREVIOUS_APPCAST" "$APPCAST"
     echo "    starting from VW_PREVIOUS_APPCAST ($VW_PREVIOUS_APPCAST)"
     return
   fi
+  # Starting a new feed once the `appcast` release exists would publish a one-item feed and
+  # drop every older version's item, so a new feed is only started when gh can see the repo
+  # and says the release isn't there. Anything less certain stops the run.
   if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
-    # Works while the repo is private, too.
-    local why
+    # Works while the repo is private, too. gh reports "release not found" for any 404,
+    # including a repo the token can't see, so check the repo first.
+    why="$(gh repo view "$REPO" --json name 2>&1)" ||
+      die "gh can't see $REPO ($why); log in with access to it, or set VW_PREVIOUS_APPCAST to the current feed"
     if why="$(gh release view "$SPARKLE_APPCAST_TAG" --repo "$REPO" --json tagName 2>&1)"; then
       gh release download "$SPARKLE_APPCAST_TAG" --repo "$REPO" --pattern appcast.xml --output "$APPCAST" ||
-        die "release $SPARKLE_APPCAST_TAG exists but its appcast.xml couldn't be downloaded"
+        die "release $SPARKLE_APPCAST_TAG exists but its appcast.xml couldn't be downloaded; set VW_PREVIOUS_APPCAST to the current feed"
       echo "    starting from the published feed (release $SPARKLE_APPCAST_TAG)"
-    elif grep -qi 'not found' <<<"$why"; then
+    elif grep -qi 'release not found' <<<"$why"; then
       echo "    no $SPARKLE_APPCAST_TAG release yet: this is the first release, starting a new feed"
     else
       die "couldn't look up release $SPARKLE_APPCAST_TAG ($why); set VW_PREVIOUS_APPCAST to the current feed"
     fi
     return
   fi
+  # No usable gh: only a downloaded feed is good enough. A 404 here can't tell "no feed yet"
+  # from "no access" (a private repo answers 404), so it stops the run too.
   tmp="$(mktemp "${TMPDIR:-/tmp}/vw-appcast-prev.XXXXXX")"
   code="$(curl -sSL -o "$tmp" -w '%{http_code}' "$FEED_URL" || true)"
   case "$code" in
     200) mv "$tmp" "$APPCAST"; echo "    starting from the published feed ($FEED_URL)" ;;
     404)
       rm -f "$tmp"
-      echo "    $FEED_URL: 404, so this is the first release; starting a new feed"
-      echo "    (while the repo is private a 404 can also mean no access: log in with gh, or set VW_PREVIOUS_APPCAST)"
+      die "$FEED_URL: 404, and gh isn't installed or logged in, so it can't be told whether the feed is missing or just not visible. Log in with gh, set VW_PREVIOUS_APPCAST to the current feed, or, for the very first release only, VW_PREVIOUS_APPCAST=none"
       ;;
     *) rm -f "$tmp"; die "couldn't download $FEED_URL (HTTP ${code:-none}); set VW_PREVIOUS_APPCAST to the current feed" ;;
   esac
@@ -401,7 +416,9 @@ fi
 # 8. What to run next
 # ---------------------------------------------------------------------------------------
 NOTES="$DIST/release-notes-$VERSION.md"
-awk -v v="$VERSION" '$0 ~ "^## \\[" v "\\]" {on=1; next} /^## \[/ {on=0} on' CHANGELOG.md >"$NOTES"
+# This version's section, up to the next "## [" heading or the trailing link definitions
+# ("[1.0.0]: https://..."), which mean nothing in a GitHub Release body.
+awk -v v="$VERSION" '$0 ~ "^## \\[" v "\\]" {on=1; next} /^## \[/ || /^\[[^]]+\]: / {on=0} on' CHANGELOG.md >"$NOTES"
 [[ -s "$NOTES" ]] || echo "Vault Wallpaper $VERSION" >"$NOTES"
 
 cat <<EOF
