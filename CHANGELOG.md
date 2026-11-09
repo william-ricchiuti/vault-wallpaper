@@ -6,11 +6,6 @@ All notable changes to Vault Wallpaper. The format follows
 
 ## [Unreleased]
 
-### Added
-
-- Automatic updates for the DMG and Homebrew versions (Sparkle 2): one small HTTPS check a
-  day, and Check for Updates… in the menu. The Mac App Store build has no updater.
-
 ## [1.0.0-beta.1] - unreleased
 
 The first beta of the native macOS app, a rewrite of the web version
@@ -36,12 +31,13 @@ The first beta of the native macOS app, a rewrite of the web version
 - Config at `~/Library/Application Support/Vault Wallpaper/config.json`, in the web format,
   reloaded when edited.
 - Draws nothing while covered or still; glow breathing runs in the window server.
-- Universal (Apple Silicon and Intel) app bundle for macOS 13+, app icon, DMG, and
-  signing/notarization scripts.
+- Universal (Apple Silicon and Intel) app bundle for macOS 13+ and app icon, as a signed and
+  notarized DMG and a Homebrew cask.
+- Automatic updates for the DMG and Homebrew versions (Sparkle 2): one small HTTPS check a
+  day, and Check for Updates… in the menu. The Mac App Store build has no updater.
 
 ### Not yet
 
-- Signed and notarized builds, the Homebrew cask and auto-update.
 - Native versions of most web themes (they draw with Default for now).
 
 [Unreleased]: https://github.com/william-ricchiuti/vault-wallpaper/compare/v1.0.0-beta.1...HEAD
