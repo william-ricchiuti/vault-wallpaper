@@ -3,8 +3,7 @@ use std::slice;
 use std::sync::OnceLock;
 
 use objc2::rc::Retained;
-use objc2::runtime::Sel;
-use objc2::{msg_send, msg_send_id, sel, ClassType};
+use objc2::{msg_send_id, ClassType};
 use objc2_app_kit::{NSBitmapImageRep, NSCursor, NSDeviceRGBColorSpace, NSImage};
 use objc2_foundation::{
     ns_string, NSData, NSDictionary, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSSize,
@@ -64,51 +63,10 @@ pub(crate) fn default_cursor() -> Retained<NSCursor> {
     NSCursor::arrowCursor()
 }
 
-unsafe fn try_cursor_from_selector(sel: Sel) -> Option<Retained<NSCursor>> {
-    let cls = NSCursor::class();
-    if msg_send![cls, respondsToSelector: sel] {
-        let cursor: Retained<NSCursor> = unsafe { msg_send_id![cls, performSelector: sel] };
-        Some(cursor)
-    } else {
-        tracing::warn!("cursor `{sel}` appears to be invalid");
-        None
-    }
-}
-
-macro_rules! def_undocumented_cursor {
-    {$(
-        $(#[$($m:meta)*])*
-        fn $name:ident();
-    )*} => {$(
-        $(#[$($m)*])*
-        #[allow(non_snake_case)]
-        fn $name() -> Retained<NSCursor> {
-            unsafe { try_cursor_from_selector(sel!($name)).unwrap_or_else(|| default_cursor()) }
-        }
-    )*};
-}
-
-def_undocumented_cursor!(
-    // Undocumented cursors: https://stackoverflow.com/a/46635398/5435443
-    fn _helpCursor();
-    fn _zoomInCursor();
-    fn _zoomOutCursor();
-    fn _windowResizeNorthEastCursor();
-    fn _windowResizeNorthWestCursor();
-    fn _windowResizeSouthEastCursor();
-    fn _windowResizeSouthWestCursor();
-    fn _windowResizeNorthEastSouthWestCursor();
-    fn _windowResizeNorthWestSouthEastCursor();
-
-    // While these two are available, the former just loads a white arrow,
-    // and the latter loads an ugly deflated beachball!
-    // pub fn _moveCursor();
-    // pub fn _waitCursor();
-
-    // An even more undocumented cursor...
-    // https://bugs.eclipse.org/bugs/show_bug.cgi?id=522349
-    fn busyButClickableCursor();
-);
+// vault-wallpaper patch: the undocumented `NSCursor` class methods (`_helpCursor`,
+// `_zoomInCursor`, `_zoomOutCursor`, the six `_windowResize…Cursor`s and
+// `busyButClickableCursor`) are gone, with the helper that called them by selector. Their
+// icons fall back to the arrow cursor in `cursor_from_icon`. See vendor/winit/PATCHES.md.
 
 // Note that loading `busybutclickable` with this code won't animate
 // the frames; instead you'll just get them all in a column.
@@ -206,18 +164,8 @@ pub(crate) fn cursor_from_icon(icon: CursorIcon) -> Retained<NSCursor> {
         CursorIcon::SResize => NSCursor::resizeDownCursor(),
         CursorIcon::EwResize | CursorIcon::ColResize => NSCursor::resizeLeftRightCursor(),
         CursorIcon::NsResize | CursorIcon::RowResize => NSCursor::resizeUpDownCursor(),
-        CursorIcon::Help => _helpCursor(),
-        CursorIcon::ZoomIn => _zoomInCursor(),
-        CursorIcon::ZoomOut => _zoomOutCursor(),
-        CursorIcon::NeResize => _windowResizeNorthEastCursor(),
-        CursorIcon::NwResize => _windowResizeNorthWestCursor(),
-        CursorIcon::SeResize => _windowResizeSouthEastCursor(),
-        CursorIcon::SwResize => _windowResizeSouthWestCursor(),
-        CursorIcon::NeswResize => _windowResizeNorthEastSouthWestCursor(),
-        CursorIcon::NwseResize => _windowResizeNorthWestSouthEastCursor(),
-        // This is the wrong semantics for `Wait`, but it's the same as
-        // what's used in Safari and Chrome.
-        CursorIcon::Wait | CursorIcon::Progress => busyButClickableCursor(),
+        // vault-wallpaper patch: Help, ZoomIn, ZoomOut, the diagonal resizes, Wait and
+        // Progress used private `NSCursor` methods; they now take the `_` arm (arrow).
         CursorIcon::Move | CursorIcon::AllScroll => webkit_move(),
         CursorIcon::Cell => webkit_cell(),
         _ => default_cursor(),

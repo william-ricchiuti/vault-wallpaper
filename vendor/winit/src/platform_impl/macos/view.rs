@@ -766,14 +766,8 @@ declare_class!(
             });
         }
 
-        // Allows us to receive Ctrl-Tab and Ctrl-Esc.
-        // Note that this *doesn't* help with any missing Cmd inputs.
-        // https://github.com/chromium/chromium/blob/a86a8a6bcfa438fa3ac2eba6f02b3ad1f8e0756f/ui/views/cocoa/bridged_content_view.mm#L816
-        #[method(_wantsKeyDownForEvent:)]
-        fn wants_key_down_for_event(&self, _event: &NSEvent) -> bool {
-            trace_scope!("_wantsKeyDownForEvent:");
-            true
-        }
+        // vault-wallpaper patch: the private `_wantsKeyDownForEvent:` override (it let winit
+        // receive Ctrl-Tab and Ctrl-Esc) is removed. See vendor/winit/PATCHES.md.
 
         #[method(acceptsFirstMouse:)]
         fn accepts_first_mouse(&self, _event: &NSEvent) -> bool {
