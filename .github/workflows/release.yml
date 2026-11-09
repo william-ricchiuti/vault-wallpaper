@@ -25,6 +25,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # packaging/notices.sh's generator; release.sh and ci.yml pin the same version.
+  CARGO_ABOUT_VERSION: 0.9.3
   REPO: william-ricchiuti/vault-wallpaper
   TAP_REPO: william-ricchiuti/homebrew-tap
 
@@ -94,6 +96,26 @@ jobs:
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: steps.existing.outputs.published != 'true'
+
+      # cargo-about for packaging/notices.sh. Installed into ~/.cargo/bin, which rust-cache
+      # saves, so a warm cache skips the build. Pinned: another version may word the notices
+      # differently.
+      - name: Install cargo-about
+        if: steps.existing.outputs.published != 'true'
+        run: |
+          if [[ "$(cargo about --version 2>/dev/null)" != "cargo-about $CARGO_ABOUT_VERSION" ]]; then
+            cargo install --locked cargo-about --version "$CARGO_ABOUT_VERSION" --features cli
+          fi
+          cargo about --version
+
+      # THIRD-PARTY-NOTICES.txt must match Cargo.lock. release.sh checks it again; failing
+      # here costs no signing or notarizing. notices.sh runs cargo-about --offline, so fetch
+      # every crate in the lock file first (all platforms; a build fetches only macOS's).
+      - name: Licence notices are up to date
+        if: steps.existing.outputs.published != 'true'
+        run: |
+          cargo fetch --locked
+          packaging/notices.sh --check
 
       - name: Import the Developer ID certificate
         if: steps.existing.outputs.published != 'true'
