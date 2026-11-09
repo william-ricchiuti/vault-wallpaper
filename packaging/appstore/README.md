@@ -11,7 +11,155 @@ The direct build (DMG, Homebrew, Sparkle) is unchanged; see [`../README.md`](../
 | `PrivacyInfo.xcprivacy` | privacy manifest: no tracking, no data collected, two required-reason APIs |
 | `sandbox-check.sh` | guided check of every feature inside the sandbox, on a local ad-hoc build |
 | `listing.md` | App Store Connect text: name, subtitle, description, keywords, privacy answers, review notes |
-| `screenshots/` | 2880×1800 screenshots rendered from a real vault |
+| `screenshots/` | 2880×1800 JPEG screenshots rendered from a real vault |
+| `xcode-build-phase.sh` | the Run Script phase of the Xcode project: cargo build, icon, version |
+| [`../../xcode/`](../../xcode) | `VaultWallpaper.xcodeproj`, the Xcode way to build, archive and upload (below) |
+
+There are two ways to make the App Store build. They produce the same app.
+
+- **Xcode (recommended):** open `xcode/VaultWallpaper.xcodeproj`, Archive, Distribute.
+  Xcode makes the certificates and profiles itself and uploads. Steps in
+  [Uploading with Xcode](#uploading-with-xcode-click-by-click).
+- **Command line (fallback):** `build.sh`, then Transporter. You make the certificates and the
+  profile on the developer website. Steps in [What William does](#what-william-does).
+
+## The Xcode project
+
+`xcode/VaultWallpaper.xcodeproj` is a macOS App target with no source files. Its one Run
+Script phase, `xcode-build-phase.sh`, runs
+`cargo build --release --no-default-features -p vault-wallpaper` for each architecture Xcode
+builds (Apple silicon and Intel for Archive), joins them with `lipo` and puts the result in
+the bundle as `Contents/MacOS/vault-wallpaper`. It also makes `AppIcon.icns` and writes the
+version from `crates/app/Cargo.toml` and the build number (the commit count, from
+`packaging/build-number.sh`) into the built `Info.plist`. Everything else is ordinary Xcode:
+
+| | |
+|---|---|
+| Info.plist | `xcode/Info.plist`, the same keys as `build.sh` writes (keep the two in step) |
+| Resources | `PrivacyInfo.xcprivacy`, `THIRD-PARTY-NOTICES.txt` |
+| Signing | automatic, team `3AP82DL922`, hardened runtime, `entitlements.plist`, App Sandbox on |
+| Bundle ID | `com.williamricchiuti.vaultwallpaper`, category Productivity, macOS 13.0+ |
+
+The build-number check applies here too: archive from `main` after `git pull`, or Xcode stops
+with "HEAD is not on origin/main". The project is generated from `xcode/project.yml` by
+[XcodeGen](https://github.com/yonaskolb/XcodeGen); the `.xcodeproj` is committed, so you only
+need XcodeGen to change the project (`cd xcode && xcodegen generate`). Command-line check
+(2026-11-08 this archived fine unsigned, and also signed with automatic signing and the Apple
+Development certificate; only the export needs the App Store profile Xcode makes in step 5):
+
+```bash
+xcodebuild -project xcode/VaultWallpaper.xcodeproj -scheme VaultWallpaper archive -archivePath /tmp/VW.xcarchive CODE_SIGNING_ALLOWED=NO
+```
+
+## Uploading with Xcode, click by click
+
+You do this part: it signs in to your Apple account and the last step publishes. Steps 1–3
+are once; 4–6 are every release.
+
+### 1. Open the project
+
+1. In Terminal: `cd ~/dev/vault-wallpaper && git checkout main && git pull`.
+2. `open xcode/VaultWallpaper.xcodeproj` (or double-click it in Finder).
+3. If Xcode asks whether to trust or open the project, say yes: its build script runs
+   `cargo` from this repository.
+
+### 2. Signing: let Xcode make the certificate and profile
+
+1. **Xcode > Settings… > Accounts.** Your Apple ID should be listed, with the team
+   "William Ricchiuti". If not: **+** > Apple ID > sign in.
+2. Close Settings. In the left sidebar click the blue **VaultWallpaper** project icon, then
+   under TARGETS click **VaultWallpaper**, then the **Signing & Capabilities** tab.
+3. Check: **Automatically manage signing** is ticked, **Team** is "William Ricchiuti",
+   **Bundle Identifier** is `com.williamricchiuti.vaultwallpaper`. App Sandbox and Hardened
+   Runtime are listed below with the entitlements from `entitlements.plist`.
+4. Xcode now registers the bundle ID and makes a development certificate and profile for
+   you; wait for the spinner next to "Provisioning Profile" to finish. It should say
+   "Xcode Managed Profile" with no red error.
+
+The Apple Distribution and Mac Installer Distribution certificates are made later, by Xcode,
+when you first click Distribute (step 5). You don't need to make them.
+
+**If Xcode refuses** (as it did for the Developer ID certificate: "only the account holder
+can…", or "No signing certificate found"), make the certificates on the website instead, the
+way you did for Developer ID:
+
+1. Keychain request file: open `/System/Library/CoreServices/Certificate Assistant.app` >
+   Certificate Assistant > Request a Certificate From a Certificate Authority…, your email,
+   **Saved to disk**.
+2. developer.apple.com > Account > Certificates, IDs & Profiles > Certificates > **+**:
+   make an **Apple Distribution** certificate, then do it again for **Mac Installer
+   Distribution**, uploading the request file each time. Download both `.cer` files.
+3. Import each one (double-clicking gave error -25294 before):
+   `security import ~/Downloads/<file>.cer -k ~/Library/Keychains/login.keychain-db`.
+   Check with `security find-identity -v`.
+4. Identifiers > **+** > App IDs > App > macOS, explicit `com.williamricchiuti.vaultwallpaper`
+   (skip if Xcode already registered it). Profiles > **+** > **Mac App Store Connect** > that
+   App ID > your Apple Distribution certificate > name "Vault Wallpaper Mac App Store" >
+   Download, then double-click the profile.
+5. Back in Xcode, keep automatic signing; in step 5 below choose **Manually manage signing**
+   and pick that certificate and profile. (Or skip Xcode: [What William does](#what-william-does)
+   uses the same files with `build.sh` and Transporter.)
+
+### 3. Make the app record in App Store Connect
+
+1. appstoreconnect.apple.com > **Apps** > **+** (top left) > **New App**.
+2. Platform **macOS**; Name **Vault Wallpaper** (if taken, see `listing.md`); Primary language
+   **English (U.S.)**; Bundle ID **com.williamricchiuti.vaultwallpaper** (it appears in the
+   list once Xcode or you registered it); SKU **vaultwallpaper-mac**; User Access **Full
+   Access**. Click **Create**.
+
+### 4. Archive
+
+1. At the top of the Xcode window, the scheme reads **VaultWallpaper** and the destination
+   **My Mac** (or Any Mac).
+2. **Product > Archive.** The first archive takes several minutes (cargo builds the app for
+   Apple silicon and Intel; watch the progress bar). Later ones are quicker.
+3. The **Organizer** window opens with the new archive selected. Its version is the
+   `Cargo.toml` version and its build number the commit count.
+
+### 5. Validate, then upload
+
+1. In the Organizer, with the archive selected, click **Validate App** > **App Store
+   Connect** > Next. Leave the options as they are, **Automatically manage signing** > Next.
+   The first time, Xcode makes your Apple Distribution and Mac Installer Distribution
+   certificates here. Click **Validate**. Fix anything it reports before going on.
+2. Click **Distribute App** > **App Store Connect** > **Distribute** (on older Xcode:
+   App Store Connect > Upload > Next > Automatically manage signing > Upload).
+3. Wait for the email "has completed processing" (10–30 minutes). The build then shows under
+   the app's **TestFlight** tab.
+
+**About `._` files.** The archive itself has none. But macOS 26+ tags every file a build
+writes with `com.apple.provenance` (Xcode's builds too: tested 2026-11-08, also from a build
+started outside Claude), and Xcode makes the upload package with `/usr/bin/productbuild`,
+which turns each tag into a `._` entry. `productbuild` on the archived app gave 12 of them.
+Nothing in Xcode can switch that off; `build.sh` avoids it by repacking its package. It is not
+known whether App Store Connect minds: **Validate App** (step 1) checks the real package on
+Apple's side, so if it passes, upload. To look yourself: **Distribute App** > **Custom** >
+**App Store Connect** > **Export**, save it, then
+
+```bash
+pkgutil --payload-files ~/Desktop/VaultWallpaper*/*.pkg | grep '/\._'
+```
+
+If Validate, the upload or review complains about `._` files or an invalid bundle or
+signature, use the command-line route (`build.sh` + Transporter) instead: same app, package
+without them.
+
+### 6. Fill in the listing and submit
+
+1. App Store Connect > Vault Wallpaper > **macOS App** > **1.0 Prepare for Submission**.
+2. Paste from `listing.md`: promotional text, description, keywords, support URL, marketing
+   URL. Drag the five `screenshots/*.jpg` into the screenshots box, in their numbered order.
+3. **Build** > **+** > pick the build you uploaded.
+4. Copyright `2026 William Ricchiuti`. **App Review Information**: sign-in not required, your
+   contact details, and the review notes from `listing.md`.
+5. Left sidebar **App Information**: category Productivity, secondary Utilities; privacy
+   policy URL `https://github.com/william-ricchiuti/vault-wallpaper/blob/main/PRIVACY.md`.
+6. **App Privacy** > Get Started > "No, we do not collect data from this app" > **Publish**.
+7. **Pricing and Availability** > Free. **Age Rating** > None for everything (4+).
+8. Back on the 1.0 page: **Version Release** > **Manually release this version**. Then
+   **Add for Review** > **Submit**. Review usually takes a day or two; answers go in the
+   App Review messages.
 
 ## How the app differs in the sandbox
 
@@ -76,6 +224,7 @@ panel and the menu-bar menu need real clicks, so this can't run unattended.
 
 ## What William does
 
+This is the command-line route, the fallback to [Uploading with Xcode](#uploading-with-xcode-click-by-click).
 Nothing below can be done by an agent: it uses your Apple Developer account, certificates and
 App Store Connect, and the last steps publish.
 
@@ -135,7 +284,7 @@ App Store Connect, and the last steps publish.
 4. Optional: TestFlight > macOS > add yourself as an internal tester and install the build from
    the TestFlight app, to try the real store-signed app before review.
 5. **App page** (App Store Connect > the app > macOS App > 1.0 Prepare for Submission): paste
-   the text from `listing.md`, upload `screenshots/*.png`, pick the build, set the copyright,
+   the text from `listing.md`, upload `screenshots/*.jpg`, pick the build, set the copyright,
    App Review contact and notes (in `listing.md`). Then:
    - App Privacy > Get Started > "No, we do not collect data from this app"; publish it.
      Privacy policy URL is required even so (placeholder in `listing.md`).

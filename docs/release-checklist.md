@@ -148,6 +148,11 @@ in `packaging/appstore/README.md`. Once `VW_TEAM_ID`, `VW_APP_IDENTITY`,
 `.pkg` through `packaging/appstore/build.sh`. Until then it says the App Store step was
 skipped. CI doesn't build it.
 
+The easier route is Xcode: open `xcode/VaultWallpaper.xcodeproj`, **Product > Archive**, then
+**Distribute App > App Store Connect**. Xcode makes the certificates and profile itself.
+Click-by-click steps: "Uploading with Xcode" in `packaging/appstore/README.md`. With that
+route `release.sh` keeps skipping the App Store step, which is fine.
+
 ### A8. Try it without publishing (anyone)
 
 ```bash

@@ -228,7 +228,8 @@ submission comes back "Invalid", read Apple's reason with
 A sandboxed build without the self-updater, signed for the store and packaged with
 `productbuild`, is in [`appstore/`](appstore/README.md): `packaging/appstore/build.sh
 --dry-run` for a local test, and the steps William takes in App Store
-Connect. `release.sh` calls it.
+Connect. `release.sh` calls it. The same build can be archived and uploaded from Xcode with
+[`../xcode/VaultWallpaper.xcodeproj`](../xcode/VaultWallpaper.xcodeproj).
 
 ## One command: `release.sh`
 

@@ -1,0 +1,82 @@
+# XcodeGen spec for VaultWallpaper.xcodeproj, the Mac App Store wrapper project.
+# The .xcodeproj is committed, so nobody needs XcodeGen to build. After editing this file:
+#   cd xcode && xcodegen generate
+# The project has no sources of its own: a Run Script phase (packaging/appstore/xcode-build-phase.sh)
+# builds the Rust app with cargo and installs it as the bundle's executable. Xcode then does the
+# Info.plist, resources, signing, Archive and the App Store upload.
+name: VaultWallpaper
+options:
+  bundleIdPrefix: com.williamricchiuti
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+settings:
+  base:
+    DEVELOPMENT_TEAM: 3AP82DL922
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+targets:
+  VaultWallpaper:
+    type: application
+    platform: macOS
+    sources:
+      - path: Info.plist
+        buildPhase: none
+      - path: ../packaging/appstore/PrivacyInfo.xcprivacy
+        buildPhase: resources
+      - path: ../THIRD-PARTY-NOTICES.txt
+        buildPhase: resources
+      - path: ../packaging/appstore/entitlements.plist
+        buildPhase: none
+      - path: ../packaging/appstore/xcode-build-phase.sh
+        buildPhase: none
+    settings:
+      base:
+        PRODUCT_NAME: Vault Wallpaper
+        EXECUTABLE_NAME: vault-wallpaper
+        PRODUCT_BUNDLE_IDENTIFIER: com.williamricchiuti.vaultwallpaper
+        INFOPLIST_FILE: Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        # Placeholders: the build phase writes the real ones (Cargo.toml version, commit count).
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: Apple Development
+        CODE_SIGN_ENTITLEMENTS: ../packaging/appstore/entitlements.plist
+        ENABLE_APP_SANDBOX: YES
+        ENABLE_HARDENED_RUNTIME: YES
+        ARCHS: $(ARCHS_STANDARD)
+        ONLY_ACTIVE_ARCH: NO
+        # Nothing is compiled or linked by Xcode, so there is nothing for it to strip or to make a dSYM of.
+        DEBUG_INFORMATION_FORMAT: dwarf
+        STRIP_INSTALLED_PRODUCT: NO
+        COPY_PHASE_STRIP: NO
+        # The script writes into the repository's target/ folder, outside Xcode's sandbox for scripts.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        SKIP_INSTALL: NO
+        INSTALL_PATH: /Applications
+      configs:
+        Debug:
+          ONLY_ACTIVE_ARCH: YES
+    preBuildScripts: []
+    postCompileScripts:
+      - name: Build the Rust app (cargo)
+        script: |
+          exec "$SRCROOT/../packaging/appstore/xcode-build-phase.sh"
+        shell: /bin/bash
+        basedOnDependencyAnalysis: false
+        inputFiles:
+          - $(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/AppIcon.icns
+schemes:
+  VaultWallpaper:
+    build:
+      targets:
+        VaultWallpaper: all
+    run:
+      config: Debug
+    archive:
+      config: Release
