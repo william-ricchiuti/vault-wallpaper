@@ -3,7 +3,9 @@ resolver = "3"
 members = ["crates/app", "crates/core", "crates/render", "spike"]
 
 # glyphon with glyph vertices uploaded without a GPU copy: vendor/glyphon/PATCHES.md.
-# winit without the private SkyLight blur calls (Mac App Store): vendor/winit/PATCHES.md.
+# winit without the private SkyLight blur calls and private selectors (Mac App Store): vendor/winit/PATCHES.md.
+# wry without the private WebKit KVC keys (Mac App Store): vendor/wry/PATCHES.md.
 [patch.crates-io]
 glyphon = { path = "vendor/glyphon" }
 winit = { path = "vendor/winit" }
+wry = { path = "vendor/wry" }
