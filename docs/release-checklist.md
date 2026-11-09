@@ -174,10 +174,11 @@ stop a real run (the placeholder Sparkle key, no changelog section, a branch tha
    ```
 
 3. Regenerate the licence notices if `Cargo.lock` or the Sparkle version changed (a real
-   `release.sh` run fails on a stale file when cargo-about is installed):
+   `release.sh` run fails on a stale file or a missing cargo-about, and CI checks it on every
+   pull request and in the release workflow):
 
    ```bash
-   cargo install --locked cargo-about   # once
+   cargo install --locked cargo-about --version 0.9.3 --features cli   # once; CI's version
    packaging/notices.sh                 # then commit THIRD-PARTY-NOTICES.txt if it changed
    ```
 
@@ -332,5 +333,11 @@ Then:
 - **"couldn't look up release appcast" / "couldn't download …appcast.xml":** the previous feed
   couldn't be fetched, and starting a new one would drop the update history. Fix `gh auth`
   or the network, or pass the current feed with `VW_PREVIOUS_APPCAST=<file>`.
+- **"…appcast.xml: 404, and gh isn't installed or logged in":** without `gh` a 404 can't be
+  told from "no access" while the repo is private. `gh auth login` and rerun, or pass
+  `VW_PREVIOUS_APPCAST=<file>`. Only for the very first release, when there is no `appcast`
+  release yet, `VW_PREVIOUS_APPCAST=none` starts a new feed on purpose.
+- **"cargo-about isn't installed":** `cargo install --locked cargo-about --version 0.9.3
+  --features cli` (the version CI uses), then rerun.
 - **CI succeeded but there's no cask PR:** `TAP_GITHUB_TOKEN` is missing or expired. Run
   `bump-cask.sh` by hand.
