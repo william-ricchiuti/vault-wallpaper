@@ -74,7 +74,8 @@ fn engine_caches_and_relaxes_locally() {
     let (tx, rx) = mpsc::channel();
     let engine = LayoutEngine::spawn(opts(), Some(cache.clone()), Duration::from_millis(50), move |f| {
         let _ = tx.send(f);
-    });
+    })
+    .expect("spawn layout thread");
     engine.set_graph(graph_of(&vault));
     let (cold, took, frames) = settled_frame(&rx);
     eprintln!("cold layout: {} ms, {frames} frames", took.as_millis());
@@ -85,7 +86,8 @@ fn engine_caches_and_relaxes_locally() {
     let (tx, rx) = mpsc::channel();
     let engine = LayoutEngine::spawn(opts(), Some(cache.clone()), Duration::from_millis(50), move |f| {
         let _ = tx.send(f);
-    });
+    })
+    .expect("spawn layout thread");
     engine.set_graph(graph_of(&vault));
     let (warm, took, frames) = settled_frame(&rx);
     eprintln!("relaunch: {} ms, {frames} frame(s)", took.as_millis());

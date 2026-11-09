@@ -29,7 +29,8 @@ pub struct ConfigWatcher {
 impl ConfigWatcher {
     /// Saves `config` without it coming back through the callback as an "edit".
     pub fn save(&self, config: &Config) -> std::io::Result<()> {
-        *self.last.lock().unwrap() = config.clone();
+        // A panic elsewhere while holding the lock leaves a plain value: keep using it.
+        *self.last.lock().unwrap_or_else(|e| e.into_inner()) = config.clone();
         save(&self.path, config)
     }
 }
@@ -79,7 +80,7 @@ pub fn watch(path: &Path, current: Config, on_change: impl Fn(Config) + Send + '
                 for issue in &loaded.issues {
                     eprintln!("{}: {} dropped: {}", path.display(), issue.key, issue.message);
                 }
-                let mut seen = last.lock().unwrap();
+                let mut seen = last.lock().unwrap_or_else(|e| e.into_inner());
                 if *seen == loaded.config {
                     continue; // our own save, or a touch with no change
                 }
@@ -90,4 +91,29 @@ pub fn watch(path: &Path, current: Config, on_change: impl Fn(Config) + Send + '
         })
     };
     Ok(ConfigWatcher { path, last, _debouncer: debouncer, _worker: worker })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A panic on another thread while it held the lock must not take saving down.
+    #[test]
+    fn save_survives_a_poisoned_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let watcher = watch(&path, Config::default(), |_| {}).unwrap();
+        let last = watcher.last.clone();
+        let _ = thread::spawn(move || {
+            let _held = last.lock().unwrap();
+            panic!("poison the lock");
+        })
+        .join();
+        assert!(watcher.last.is_poisoned());
+
+        let changed = Config { vault_path: Some("/somewhere".into()), ..Config::default() };
+        watcher.save(&changed).unwrap();
+        assert_eq!(*watcher.last.lock().unwrap_or_else(|e| e.into_inner()), changed);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("/somewhere"));
+    }
 }
