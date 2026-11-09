@@ -201,12 +201,10 @@ export VW_NOTARY_PROFILE=vault-wallpaper-notary
 packaging/release.sh 1.0.0-beta.2
 ```
 
-Run it from Terminal.app, not from a shell that an app such as an editor or Claude
-started. macOS tags every file such shells write with `com.apple.provenance`, which ends up
-as `._` files in the App Store package. `appstore/build.sh` copies the bundle out of a
-staging folder with `ditto --norsrc --noextattr --noqtn`, which removes attributes the
-sources carry, but under such a shell the kernel tags the fresh copies again, and the build
-refuses the package.
+Any shell works, Terminal.app or not. macOS tags every file a build writes with
+`com.apple.provenance`, which can't be removed, and `productbuild` would store each tag as a
+`._` file in the App Store package. `appstore/build.sh` repacks the package's payload without
+them and stops if any are left.
 
 It checks the Sparkle key, the changelog and the build number first, then bumps the version,
 builds the universal app with the Sparkle updater, signs it, notarizes and staples the app,

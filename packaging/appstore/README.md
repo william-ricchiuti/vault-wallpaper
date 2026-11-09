@@ -115,9 +115,10 @@ App Store Connect, and the last steps publish.
    packaging/appstore/build.sh
    ```
 
-   Output: `dist/appstore/Vault-Wallpaper-<version>-<build>.pkg`. Run it from Terminal: the
-   script stops if the package contains `._` files, which come from extended attributes on
-   files written by some app-launched shells.
+   Output: `dist/appstore/Vault-Wallpaper-<version>-<build>.pkg`. Any shell works. macOS tags
+   every file a build writes with `com.apple.provenance`, and `productbuild` would turn each
+   tag into a `._` file in the package, so the script repacks the payload without them and
+   stops if any are left.
 2. Optional check that it installs and runs signed: `sudo installer -store -pkg dist/appstore/Vault-Wallpaper-*.pkg -target /`
    (then delete the installed copy).
 3. **Upload** with either

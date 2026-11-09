@@ -170,18 +170,51 @@ PLIST
 printf 'APPL????' >"$STAGE_APP/Contents/PkgInfo"
 plutil -lint "$STAGE_APP/Contents/Info.plist"
 
-# Extended attributes in the bundle become "._" AppleDouble files in the package payload,
-# which App Store validation can reject. The sources (icon, plist, binary, a downloaded
-# provisioning profile) may carry some, such as com.apple.quarantine or
-# com.apple.provenance, so the bundle is copied out of the staging folder without them.
+# Extended attributes in the bundle become "._" AppleDouble entries in the package payload
+# (pkgbuild, which productbuild runs, writes one per attributed file). The sources (icon,
+# plist, binary, a downloaded provisioning profile) may carry some, such as
+# com.apple.quarantine, so the bundle is copied out of the staging folder without them.
 # --noclone matters: on APFS ditto otherwise clones, and a clone keeps every attribute
-# whatever --noextattr says. Run from a shell that macOS tracks for provenance (one started
-# by an editor or another app, or a script file that itself has the attribute executed
-# directly), the kernel tags even the fresh copies; the payload check below catches that.
+# whatever --noextattr says. That copy isn't enough on its own: macOS 26+ tags every file
+# a build writes with com.apple.provenance, which xattr can't remove (seen from Terminal.app
+# too), so after productbuild the component's payload is repacked without the AppleDouble
+# entries (repack_without_appledouble below).
 export COPYFILE_DISABLE=1
 echo "==> staging copy without extended attributes (ditto --noclone --norsrc --noextattr --noqtn)"
 ditto --noclone --norsrc --noextattr --noqtn "$STAGE_APP" "$APP"
 xattr -cr "$APP" 2>/dev/null || true
+
+# Rewrites the component package inside the product archive $1 without "._" entries: the
+# payload is a root-owned odc cpio archive of the app made by tar with no extended
+# attributes (what pkgbuild writes, minus the AppleDouble entries), and the bill of
+# materials is pkgbuild's own with those lines dropped. Distribution and PackageInfo stay
+# as productbuild wrote them, apart from the file count. Leaves an unsigned product.
+repack_without_appledouble() {
+  local pkg="$1" exp="$WORK/pkg-expanded" root="$WORK/payload-root" comp n
+  rm -rf "$exp" "$root"
+  pkgutil --expand "$pkg" "$exp"
+  comp="$(find "$exp" -mindepth 1 -maxdepth 1 -type d -name '*.pkg' | head -n 1)"
+  [[ -n "$comp" && -f "$comp/Bom" && -f "$comp/Payload" ]] || { echo "error: no component package in $pkg" >&2; exit 1; }
+  mkdir -p "$root"
+  ditto --noclone --norsrc --noextattr --noqtn "$APP" "$root/$APP_NAME.app"
+  # productbuild lists the install folder itself as ".  0  0/0", which mkbom -i silently
+  # turns into an empty bill of materials; 40755 root:wheel is what pkgbuild --root writes.
+  lsbom "$comp/Bom" | grep -v '/\._' | sed $'1s/^\\.\t0\t/.\t40755\t/' >"$WORK/bom.txt"
+  rm -f "$comp/Bom" "$comp/Payload"
+  mkbom -i "$WORK/bom.txt" "$comp/Bom"
+  tar -c --format odc --uid 0 --gid 0 --uname root --gname wheel \
+    --no-mac-metadata --no-xattrs --no-acls --no-fflags -C "$root" . | gzip -9 >"$comp/Payload"
+  # The payload and the bill of materials must list the same files.
+  if ! diff <(lsbom -s "$comp/Bom" | sort) <(gzip -dc "$comp/Payload" | cpio -it 2>/dev/null | sort) >&2; then
+    echo "error: repacked payload and bill of materials disagree" >&2
+    exit 1
+  fi
+  n="$(lsbom -s "$comp/Bom" | wc -l | tr -d ' ')"
+  sed -i '' -E "s/numberOfFiles=\"[0-9]+\"/numberOfFiles=\"$n\"/" "$comp/PackageInfo"
+  rm -f "$pkg"
+  pkgutil --flatten "$exp" "$pkg"
+  rm -rf "$exp" "$root"
+}
 
 PKG="$OUT/Vault-Wallpaper-$SHORT_VERSION-$BUILD_NUMBER.pkg"
 rm -f "$PKG"
@@ -191,6 +224,7 @@ if [[ -n "$ADHOC" ]]; then
   codesign --verify --strict --verbose=2 "$APP"
   echo "==> unsigned installer package (structure check only)"
   productbuild --component "$APP" /Applications "$PKG"
+  repack_without_appledouble "$PKG"
 else
   echo "==> embedding the provisioning profile"
   ditto --noclone --norsrc --noextattr --noqtn "$VW_PROVISIONING_PROFILE" "$APP/Contents/embedded.provisionprofile"
@@ -204,18 +238,17 @@ else
   codesign --force --timestamp --options runtime --entitlements "$SIGNED_ENT" --sign "$VW_APP_IDENTITY" "$APP"
   codesign --verify --strict --verbose=2 "$APP"
   echo "==> installer package: $VW_INSTALLER_IDENTITY"
-  productbuild --component "$APP" /Applications --sign "$VW_INSTALLER_IDENTITY" "$PKG"
+  productbuild --component "$APP" /Applications "$WORK/unsigned.pkg"
+  repack_without_appledouble "$WORK/unsigned.pkg"
+  productsign --sign "$VW_INSTALLER_IDENTITY" "$WORK/unsigned.pkg" "$PKG"
   pkgutil --check-signature "$PKG"
 fi
 
 DOTS="$(pkgutil --payload-files "$PKG" | grep -c '/\._' || true)"
 if [[ "$DOTS" != 0 ]]; then
-  echo "warning: the package has $DOTS '._' AppleDouble entries (extended attributes such as" >&2
-  echo "         com.apple.provenance that xattr -c can't remove). macOS adds it to every file a" >&2
-  echo "         provenance-tracked process writes (a shell started by an editor or another app)," >&2
-  echo "         even after the clean ditto copy. Build from Terminal.app (or a launchd job) and" >&2
-  echo "         check: pkgutil --payload-files \"$PKG\" | grep '/\._'" >&2
-  [[ -n "$ADHOC" ]] || exit 1
+  echo "error: the package still has $DOTS '._' AppleDouble entries after repacking:" >&2
+  echo "       pkgutil --payload-files \"$PKG\" | grep '/\._'" >&2
+  exit 1
 fi
 
 echo "==> entitlements in the signature"
