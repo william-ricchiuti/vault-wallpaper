@@ -16,9 +16,9 @@ are for this text. Everything marked **TODO** needs William.
 | Price | Free |
 | Age rating | 4+ (every question answered None/No) |
 | Copyright | 2026 William Ricchiuti |
-| Support URL | **TODO** `https://github.com/william-ricchiuti/vault-wallpaper/issues` once the repo is public, or a page on your site |
-| Marketing URL (optional) | **TODO** the repo or a landing page |
-| Privacy policy URL (required) | **TODO** a page with the text in [Privacy policy text](#privacy-policy-text) below, e.g. `PRIVACY.md` in the public repo |
+| Support URL | `https://github.com/william-ricchiuti/vault-wallpaper/issues` |
+| Marketing URL (optional) | `https://github.com/william-ricchiuti/vault-wallpaper` |
+| Privacy policy URL (required) | `https://github.com/william-ricchiuti/vault-wallpaper/blob/main/PRIVACY.md` (the text below, in [`PRIVACY.md`](../../PRIVACY.md)) |
 
 Don't use "Obsidian" in the name, subtitle or keywords: it's Obsidian's trademark
 (guideline 5.2.1; 2.3.7 for keywords). Saying the app works with Obsidian vaults in the
@@ -138,7 +138,9 @@ This matches `PrivacyInfo.xcprivacy` (no tracking, no collected data types).
 > analytics, no advertising and makes no network connections. Exported pictures are saved
 > where you can see them, in Pictures > Vault Wallpaper.
 >
-> Questions: **TODO** contact email or the issue tracker.
+> Questions: open an issue at https://github.com/william-ricchiuti/vault-wallpaper/issues.
+
+The full policy is [`PRIVACY.md`](../../PRIVACY.md); keep the two in step.
 
 ## App Review information
 
