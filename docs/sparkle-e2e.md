@@ -165,6 +165,37 @@ make one due by setting `SULastCheckTime` in the past, as above.
 test2's) kept both items, newest first, each with its own `sparkle:edSignature`: starting a
 release's appcast from the published feed keeps older versions in it.
 
+## CI signing path (`VW_SPARKLE_PRIVATE_KEY` on stdin), 2026-11-08
+
+`release.yml` passes the secret `SPARKLE_PRIVATE_KEY` as `VW_SPARKLE_PRIVATE_KEY`, and
+`make-appcast.sh` pipes it to `generate_appcast --ed-key-file -`. That path had never run. It
+was tested with a throwaway key made as in step 1 above (a scratch folder, never the Keychain)
+and the DMG from `release.sh 1.0.0-beta.1 --dry-run`:
+
+```bash
+VW_SPARKLE_PRIVATE_KEY="$(cat seed)" packaging/make-appcast.sh dist/Vault-Wallpaper-1.0.0-beta.1.dmg --out a.xml
+```
+
+- **First try: no signature, and no warning from Sparkle.** `generate_appcast` wrote the item
+  without `sparkle:edSignature` and exited 0; only `make-appcast.sh`'s final grep stopped it.
+  The same happened with `--ed-key-file <file>`, so stdin wasn't the cause. The cause: the
+  dry-run app's `SUPublicEDKey` is the placeholder, and `generate_appcast` only signs when the
+  private key matches the app's `SUPublicEDKey`. A wrong secret in CI would fail the same way.
+- **Fix:** `make-appcast.sh` now reads `SUPublicEDKey` from the app in the DMG and stops
+  before signing, with the reason, when it is missing or the placeholder, or when the public
+  half of `VW_SPARKLE_PRIVATE_KEY` / `VW_SPARKLE_KEY_FILE` (derived with openssl) differs
+  from it. The Keychain path can't be compared this way and still relies on the final grep.
+- **With a matching key** (a copy of the dry-run app with the throwaway public key, in a new
+  DMG): exit 0, the `<enclosure>` has `sparkle:edSignature` and the `v1.0.0-beta.1` download
+  URL, and `sign_update --verify --ed-key-file seed <dmg> <signature>` accepts it. The key on
+  stdin, with or without a trailing newline, and in a file gave the same signature.
+- **Checks:** a different throwaway key → exit 1, "the Sparkle private key doesn't match the
+  app's SUPublicEDKey"; the placeholder app → exit 1, "has no real SUPublicEDKey".
+
+The throwaway keys were deleted afterwards. So for CI: `SPARKLE_PRIVATE_KEY` must be the
+private half of the key whose public half is in `packaging/sparkle.env` (what
+`generate_keys -x` exports: base64 of the 32-byte seed).
+
 ## Cleanup after a run
 
 Sparkle keeps its download and installer state in
