@@ -15,8 +15,8 @@
 		0BCE2F8932688BA7CC5FBB47 /* xcode-build-phase.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "xcode-build-phase.sh"; sourceTree = "<group>"; };
 		129D32E75D26C1F89BF79B1E /* entitlements.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = entitlements.plist; sourceTree = "<group>"; };
 		20BF7D2B021B196B9A6CFBDB /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
-		6EAA15AA1F4B961FD9423D02 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
-		B694F97700109865F14D10C0 /* VaultWallpaper.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = VaultWallpaper.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		6EAA15AA1F4B961FD9423D02 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		B694F97700109865F14D10C0 /* Vault Wallpaper.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Vault Wallpaper.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		ED6D3D3519D719126666DC1D /* THIRD-PARTY-NOTICES.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "THIRD-PARTY-NOTICES.txt"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -51,7 +51,7 @@
 		8034C7B9855757B647191E66 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				B694F97700109865F14D10C0 /* VaultWallpaper.app */,
+				B694F97700109865F14D10C0 /* Vault Wallpaper.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -85,7 +85,7 @@
 			packageProductDependencies = (
 			);
 			productName = VaultWallpaper;
-			productReference = B694F97700109865F14D10C0 /* VaultWallpaper.app */;
+			productReference = B694F97700109865F14D10C0 /* Vault Wallpaper.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -299,6 +299,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
 				CODE_SIGN_ENTITLEMENTS = ../packaging/appstore/entitlements.plist;
 				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				COPY_PHASE_STRIP = NO;
@@ -332,6 +333,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
 				CODE_SIGN_ENTITLEMENTS = ../packaging/appstore/entitlements.plist;
 				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				COPY_PHASE_STRIP = NO;

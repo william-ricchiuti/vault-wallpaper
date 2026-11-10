@@ -1,6 +1,8 @@
 # XcodeGen spec for VaultWallpaper.xcodeproj, the Mac App Store wrapper project.
 # The .xcodeproj is committed, so nobody needs XcodeGen to build. After editing this file:
 #   cd xcode && xcodegen generate
+# Xcode then tidies the generated files when it opens them (the product reference becomes
+# "Vault Wallpaper.app", the scheme format changes); commit what Xcode writes, it's harmless.
 # The project has no sources of its own: a Run Script phase (packaging/appstore/xcode-build-phase.sh)
 # builds the Rust app with cargo and installs it as the bundle's executable. Xcode then does the
 # Info.plist, resources, signing, Archive and the App Store upload.

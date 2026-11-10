@@ -3,3 +3,6 @@ target/
 *.log
 dist/
 .cache/
+
+# Xcode per-user state
+xcuserdata/
