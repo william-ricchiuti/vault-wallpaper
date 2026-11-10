@@ -31,7 +31,12 @@ Script phase, `xcode-build-phase.sh`, runs
 builds (Apple silicon and Intel for Archive), joins them with `lipo` and puts the result in
 the bundle as `Contents/MacOS/vault-wallpaper`. It also makes `AppIcon.icns` and writes the
 version from `crates/app/Cargo.toml` and the build number (the commit count, from
-`packaging/build-number.sh`) into the built `Info.plist`. Everything else is ordinary Xcode:
+`packaging/build-number.sh`) into the built `Info.plist`. Unlike `build.sh` it builds with
+line tables (in its own cargo folder, `target/xcode-appstore`) and makes a dSYM with
+`dsymutil`, which Archive keeps and Distribute uploads, so crash reports in App Store Connect
+show function names and lines; the shipped binary is then stripped of the debug map. Without
+it the upload ends with "Upload Symbols Failed" (harmless, but now gone). Everything else is
+ordinary Xcode:
 
 | | |
 |---|---|

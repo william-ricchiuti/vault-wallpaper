@@ -5,6 +5,8 @@
 # It does what packaging/appstore/build.sh does before signing:
 #   - cargo build --release --no-default-features -p vault-wallpaper for each arch in $ARCHS
 #     (arm64 and x86_64 for Archive), lipo'd into the bundle as the executable;
+#   - a dSYM next to the app (Xcode puts it in the archive and uploads it, so App Store Connect
+#     crash reports show function names and lines), then the debug map stripped from the binary;
 #   - AppIcon.icns from packaging/icon/icon-1024.png;
 #   - the version (crates/app/Cargo.toml) and build number (commit count, packaging/build-number.sh)
 #     written into the built Info.plist.
@@ -46,17 +48,22 @@ done
 
 # cargo runs in a clean environment, as from Terminal: Xcode exports hundreds of build settings
 # (MACOSX_DEPLOYMENT_TARGET breaks proc macros with --target, see packaging/build-app.sh; SDKROOT,
-# ARCHS and others change what the cc crate does) and they would also make cargo rebuild
-# everything that build.sh already built.
+# ARCHS and others change what the cc crate does) and would make each build differ from the last.
 CARGO_ENV=(env -i HOME="$HOME" USER="${USER:-}" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" LANG="${LANG:-en_US.UTF-8}")
-for v in CARGO_HOME RUSTUP_HOME CARGO_TARGET_DIR RUSTUP_TOOLCHAIN; do
+for v in CARGO_HOME RUSTUP_HOME RUSTUP_TOOLCHAIN; do
   [[ -n "${!v:-}" ]] && CARGO_ENV+=("$v=${!v}")
 done
+# Line tables (function names, files, lines; no variables) for the dSYM. They change the
+# release profile, so this build has its own target folder instead of rebuilding build.sh's.
+# "unpacked" leaves the debug info in the object files for dsymutil to collect below.
+XC_TARGET="${CARGO_TARGET_DIR:-$ROOT/target}/xcode-appstore"
+CARGO_ENV+=(CARGO_TARGET_DIR="$XC_TARGET" CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
+  CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=unpacked CARGO_PROFILE_RELEASE_STRIP=none)
 SLICES=()
 for t in "${TARGETS[@]}"; do
-  echo "cargo build --release --locked --no-default-features -p $BIN_NAME --target $t"
+  echo "cargo build --release --locked --no-default-features -p $BIN_NAME --target $t (line tables)"
   (cd "$ROOT" && "${CARGO_ENV[@]}" cargo build --release --locked --no-default-features -p "$BIN_NAME" --target "$t")
-  SLICES+=("${CARGO_TARGET_DIR:-$ROOT/target}/$t/release/$BIN_NAME")
+  SLICES+=("$XC_TARGET/$t/release/$BIN_NAME")
 done
 
 EXE="$TARGET_BUILD_DIR/$EXECUTABLE_PATH"
@@ -64,6 +71,18 @@ mkdir -p "$(dirname "$EXE")"
 rm -f "$EXE"
 lipo -create "${SLICES[@]}" -output "$EXE"
 lipo -info "$EXE"
+
+# dSYM: Xcode only makes one for code it links itself. DWARF_DSYM_FOLDER_PATH is next to the
+# app; Archive copies it into the archive's dSYMs folder and Distribute uploads it.
+if [[ "${DEBUG_INFORMATION_FORMAT:-}" == dwarf-with-dsym ]]; then
+  DSYM="$DWARF_DSYM_FOLDER_PATH/$DWARF_DSYM_FILE_NAME"
+  rm -rf "$DSYM"
+  dsymutil "$EXE" -o "$DSYM"
+  dwarfdump --uuid "$DSYM"
+fi
+# Drop the debug map (paths to this Mac's object files) from the shipped binary; the symbol
+# table stays, as in build.sh's binary.
+strip -S "$EXE"
 
 RES="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
 ICON_PNG="$ROOT/packaging/icon/icon-1024.png"

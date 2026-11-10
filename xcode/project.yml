@@ -47,8 +47,8 @@ targets:
         ENABLE_HARDENED_RUNTIME: YES
         ARCHS: $(ARCHS_STANDARD)
         ONLY_ACTIVE_ARCH: NO
-        # Nothing is compiled or linked by Xcode, so there is nothing for it to strip or to make a dSYM of.
-        DEBUG_INFORMATION_FORMAT: dwarf
+        # Xcode links nothing, so the build phase makes the dSYM (dsymutil) and strips the binary.
+        DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
         STRIP_INSTALLED_PRODUCT: NO
         COPY_PHASE_STRIP: NO
         # The script writes into the repository's target/ folder, outside Xcode's sandbox for scripts.
@@ -71,6 +71,7 @@ targets:
         outputFiles:
           - $(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/AppIcon.icns
+          - $(DWARF_DSYM_FOLDER_PATH)/$(DWARF_DSYM_FILE_NAME)
 schemes:
   VaultWallpaper:
     build:
